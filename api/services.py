@@ -1,7 +1,7 @@
 import os
 import httpx
 from fastapi import HTTPException
-from schemas import RouteRequest, RouteResponse, RouteSegment, LocationPoint, Coordinate
+from api.schemas import RouteRequest, RouteResponse, RouteSegment, LocationPoint, Coordinate
 
 # 이 아래의 함수나 로직들은 기존과 완전히 동일하게 유지하면 돼
 KAKAO_REST_API_KEY = os.environ.get("KAKAO_REST_API_KEY")
