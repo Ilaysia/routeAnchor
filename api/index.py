@@ -1,6 +1,6 @@
 from fastapi import FastAPI
-from api.schemas import RouteRequest, RouteResponse
-from api.services import process_optimized_route
+from schemas import RouteRequest, RouteResponse
+from services import process_optimized_route
 
 app = FastAPI(title="Route Anchor API")
 
