@@ -65,46 +65,49 @@ async def fetch_segment_from_odsay(start: LocationPoint, end: LocationPoint, opt
             best_path = all_paths[0]
             info = best_path["info"]
             
-            # 🔥 핵심 1. 실제 도로의 굽은 길(그래픽 데이터) 정보를 얻기 위해 mapObj 추출 및 API 추가 호출
             map_obj = info.get("mapObj")
             graphic_lanes = []
             
             if map_obj:
-                lane_url = "[https://api.odsay.com/v1/api/loadLane](https://api.odsay.com/v1/api/loadLane)"
-                lane_params = {
-                    "apiKey": ODSAY_API_KEY,
-                    "mapObject": map_obj
-                }
-                async with httpx.AsyncClient() as client:
-                    lane_res = await client.get(lane_url, params=lane_params)
-                    if lane_res.status_code == 200:
-                        lane_data = lane_res.json()
-                        if "result" in lane_data and "lane" in lane_data["result"]:
-                            graphic_lanes = lane_data["result"]["lane"]
+                try:
+                    lane_url = "https://api.odsay.com/v1/api/loadLane"
+                    lane_params = {
+                        "apiKey": ODSAY_API_KEY,
+                        "mapObject": map_obj
+                    }
+                    async with httpx.AsyncClient() as client:
+                        lane_res = await client.get(lane_url, params=lane_params)
+                        if lane_res.status_code == 200:
+                            lane_data = lane_res.json()
+                            if "result" in lane_data and "lane" in lane_data["result"]:
+                                graphic_lanes = lane_data["result"]["lane"]
+                except Exception as e:
+                    print(f"ODsay 그래픽 노선 API 에러 (무시하고 정류장 직선으로 대체합니다): {e}")
             
             total_time = info.get("totalTime", 0)
             total_fare = info.get("payment", 0)
             total_walk = info.get("totalWalk", 0)
             
             segments = []
-            lane_index = 0  # 버스/지하철 순서에 맞게 그래픽 데이터를 매칭할 인덱스
+            lane_index = 0
             
             for sub in best_path.get("subPath", []):
                 traffic_type = sub.get("trafficType")
                 station_id = None
                 path_coords = []
 
-                # 🔥 핵심 2. 대중교통(버스, 지하철)일 경우 실제 굽은 도로(graphPos) 좌표들을 수집
                 if traffic_type in (1, 2):
                     if lane_index < len(graphic_lanes):
-                        lane_info = graphic_lanes[lane_index]
-                        for section in lane_info.get("section", []):
-                            for pos in section.get("graphPos", []):
-                                if "x" in pos and "y" in pos:
-                                    path_coords.append(Coordinate(latitude=float(pos["y"]), longitude=float(pos["x"])))
+                        try:
+                            lane_info = graphic_lanes[lane_index]
+                            for section in lane_info.get("section", []):
+                                for pos in section.get("graphPos", []):
+                                    if "x" in pos and "y" in pos:
+                                        path_coords.append(Coordinate(latitude=float(pos["y"]), longitude=float(pos["x"])))
+                        except Exception as e:
+                            print(f"그래픽 좌표 파싱 에러: {e}")
                         lane_index += 1
                     
-                    # API 에러로 도로 데이터를 못 가져왔을 때를 대비한 방어 코드 (정류장 연결)
                     if not path_coords:
                         pass_stop_list = sub.get("passStopList")
                         if pass_stop_list and isinstance(pass_stop_list, dict):
@@ -114,7 +117,6 @@ async def fetch_segment_from_odsay(start: LocationPoint, end: LocationPoint, opt
                                 if sx and sy:
                                     path_coords.append(Coordinate(latitude=float(sy), longitude=float(sx)))
 
-                # 도보 구간 (ODsay는 도보 상세 곡선은 주지 않으므로 양 끝점만 연결)
                 elif traffic_type == 3:
                     start_x = sub.get("startX")
                     start_y = sub.get("startY")
@@ -158,9 +160,9 @@ async def fetch_segment_from_odsay(start: LocationPoint, end: LocationPoint, opt
                 segments=segments
             )
             
-        except (KeyError, IndexError) as e:
+        except Exception as e:
             print(f"데이터 파싱 에러: {e}, 응답 원본: {data}")
-            raise HTTPException(status_code=500, detail="API 응답 구조 파싱 실패")
+            raise HTTPException(status_code=500, detail=f"API 응답 구조 파싱 실패: {e}")
 
 async def process_optimized_route(request: RouteRequest) -> RouteResponse:
     all_points = [request.startPoint] + request.anchorPoints + [request.endPoint]
