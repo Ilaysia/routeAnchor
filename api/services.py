@@ -75,20 +75,29 @@ async def fetch_segment_from_odsay(start: LocationPoint, end: LocationPoint, opt
                 traffic_type = sub.get("trafficType")
                 station_id = None
                 path_coords = []
-                
-                # 구간 시작점 좌표 추가
-                if "startX" in sub and "startY" in sub:
-                    path_coords.append(Coordinate(latitude=float(sub["startY"]), longitude=float(sub["startX"])))
-                
-                # 정류장이나 역을 지날 때마다의 세부 경로 좌표 추가
-                if "passStopList" in sub and "stations" in sub["passStopList"]:
-                    for station in sub["passStopList"]["stations"]:
-                        path_coords.append(Coordinate(latitude=float(station["y"]), longitude=float(station["x"])))
-                
-                # 구간 도착점 좌표 추가
-                if "endX" in sub and "endY" in sub:
-                    path_coords.append(Coordinate(latitude=float(sub["endY"]), longitude=float(sub["endX"])))
-                
+
+                # 1. 구간 시작점 안전 추출
+                start_x = sub.get("startX")
+                start_y = sub.get("startY")
+                if start_x and start_y:
+                    path_coords.append(Coordinate(latitude=float(start_y), longitude=float(start_x)))
+
+                # 2. 정류장 목록 안전 추출 (데이터가 아예 없거나 null일 경우 대비)
+                pass_stop_list = sub.get("passStopList")
+                if pass_stop_list and isinstance(pass_stop_list, dict):
+                    stations = pass_stop_list.get("stations", [])
+                    for station in stations:
+                        sx = station.get("x")
+                        sy = station.get("y")
+                        if sx and sy:
+                            path_coords.append(Coordinate(latitude=float(sy), longitude=float(sx)))
+
+                # 3. 구간 도착점 안전 추출
+                end_x = sub.get("endX")
+                end_y = sub.get("endY")
+                if end_x and end_y:
+                    path_coords.append(Coordinate(latitude=float(end_y), longitude=float(end_x)))
+
                 if traffic_type == 1:
                     seg_type = "SUBWAY"
                     instruction = f"[{sub['lane'][0]['name']}] {sub['startName']}역 승차 -> {sub['endName']}역 하차"
@@ -102,7 +111,7 @@ async def fetch_segment_from_odsay(start: LocationPoint, end: LocationPoint, opt
                     instruction = f"도보 이동 ({sub.get('distance', 0)}m)"
                 else:
                     continue
-                    
+
                 segments.append(RouteSegment(
                     segmentType=seg_type,
                     instruction=instruction,
@@ -113,6 +122,12 @@ async def fetch_segment_from_odsay(start: LocationPoint, end: LocationPoint, opt
                     realTimeArrivalInfo=None, 
                     pathCoordinates=path_coords
                 ))
+            return RouteResponse(
+                totalTimeMin=total_time,
+                totalFareWon=total_fare,
+                totalWalkDistanceMeter=total_walk,
+                segments=segments
+            )
             
         except (KeyError, IndexError) as e:
             print(f"데이터 파싱 에러: {e}, 응답 원본: {data}")
