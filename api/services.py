@@ -154,11 +154,13 @@ async def process_optimized_route(request: RouteRequest) -> RouteResponse:
             ))
             total_time += 5
 
+    anchor_coords = [Coordinate(latitude=p.latitude, longitude=p.longitude) for p in request.anchorPoints]
     return RouteResponse(
         totalTimeMin=total_time,
         totalFareWon=total_fare,
         totalWalkDistanceMeter=total_walk,
         segments=merged_segments,
         startCoordinate=Coordinate(latitude=all_points[0].latitude, longitude=all_points[0].longitude),
-        endCoordinate=Coordinate(latitude=all_points[-1].latitude, longitude=all_points[-1].longitude)
+        endCoordinate=Coordinate(latitude=all_points[-1].latitude, longitude=all_points[-1].longitude),
+        anchorCoordinates=anchor_coords
     )
