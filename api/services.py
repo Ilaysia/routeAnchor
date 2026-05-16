@@ -74,6 +74,20 @@ async def fetch_segment_from_odsay(start: LocationPoint, end: LocationPoint, opt
             for sub in best_path.get("subPath", []):
                 traffic_type = sub.get("trafficType")
                 station_id = None
+                path_coords = []
+                
+                # 구간 시작점 좌표 추가
+                if "startX" in sub and "startY" in sub:
+                    path_coords.append(Coordinate(latitude=float(sub["startY"]), longitude=float(sub["startX"])))
+                
+                # 정류장이나 역을 지날 때마다의 세부 경로 좌표 추가
+                if "passStopList" in sub and "stations" in sub["passStopList"]:
+                    for station in sub["passStopList"]["stations"]:
+                        path_coords.append(Coordinate(latitude=float(station["y"]), longitude=float(station["x"])))
+                
+                # 구간 도착점 좌표 추가
+                if "endX" in sub and "endY" in sub:
+                    path_coords.append(Coordinate(latitude=float(sub["endY"]), longitude=float(sub["endX"])))
                 
                 if traffic_type == 1:
                     seg_type = "SUBWAY"
@@ -97,15 +111,8 @@ async def fetch_segment_from_odsay(start: LocationPoint, end: LocationPoint, opt
                     endLocationName=sub.get("endName", "도보 도착"),
                     stationId=station_id if station_id else None,
                     realTimeArrivalInfo=None, 
-                    pathCoordinates=[] 
+                    pathCoordinates=path_coords
                 ))
-                
-            return RouteResponse(
-                totalTimeMin=total_time,
-                totalFareWon=total_fare,
-                totalWalkDistanceMeter=total_walk,
-                segments=segments
-            )
             
         except (KeyError, IndexError) as e:
             print(f"데이터 파싱 에러: {e}, 응답 원본: {data}")
