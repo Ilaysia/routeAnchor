@@ -70,19 +70,22 @@ async def fetch_segment_from_odsay(start: LocationPoint, end: LocationPoint, opt
             
             if map_obj:
                 try:
-                    lane_url = "https://api.odsay.com/v1/api/loadLane"
-                    lane_params = {
-                        "apiKey": ODSAY_API_KEY,
-                        "mapObject": map_obj
-                    }
+                    # httpx의 자동 인코딩 때문에 특수기호(: @)가 깨지는 것을 막기 위해 URL을 직접 강제 조립합니다.
+                    lane_url_full = f"https://api.odsay.com/v1/api/loadLane?apiKey={ODSAY_API_KEY}&mapObject={map_obj}"
+                    
                     async with httpx.AsyncClient() as client:
-                        lane_res = await client.get(lane_url, params=lane_params)
+                        lane_res = await client.get(lane_url_full)
                         if lane_res.status_code == 200:
                             lane_data = lane_res.json()
                             if "result" in lane_data and "lane" in lane_data["result"]:
                                 graphic_lanes = lane_data["result"]["lane"]
+                                print(f"✅ 노선 그래픽 데이터 {len(graphic_lanes)}개 추출 완벽 성공!")
+                            else:
+                                print(f"❌ 그래픽 데이터 구조 이상: {lane_data}")
+                        else:
+                            print(f"❌ ODsay loadLane API 실패: {lane_res.status_code} {lane_res.text}")
                 except Exception as e:
-                    print(f"ODsay 그래픽 노선 API 에러 (무시하고 정류장 직선으로 대체합니다): {e}")
+                    print(f"❌ 노선 그래픽 API 통신 에러: {e}")
             
             total_time = info.get("totalTime", 0)
             total_fare = info.get("payment", 0)
