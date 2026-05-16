@@ -41,3 +41,6 @@ class RouteResponse(BaseModel):
     totalFareWon: int
     totalWalkDistanceMeter: int
     segments: List[RouteSegment]
+    
+    startCoordinate: Optional[Coordinate] = None
+    endCoordinate: Optional[Coordinate] = None

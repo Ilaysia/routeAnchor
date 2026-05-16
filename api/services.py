@@ -158,5 +158,7 @@ async def process_optimized_route(request: RouteRequest) -> RouteResponse:
         totalTimeMin=total_time,
         totalFareWon=total_fare,
         totalWalkDistanceMeter=total_walk,
-        segments=merged_segments
+        segments=merged_segments,
+        startCoordinate=Coordinate(latitude=all_points[0].latitude, longitude=all_points[0].longitude),
+        endCoordinate=Coordinate(latitude=all_points[-1].latitude, longitude=all_points[-1].longitude)
     )
