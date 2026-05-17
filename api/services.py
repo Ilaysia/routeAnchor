@@ -107,7 +107,6 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                 start_name = leg.get("start", {}).get("name", "출발")
                 end_name = leg.get("end", {}).get("name", "도착")
 
-                # 새로 추가된 강력한 이름 기반 필터링 (앵커포인트 끊김 방어용)
                 check_start_name = start.name if i == 0 else start_name
                 check_end_name = end.name if i == len(legs) - 1 else end_name
                 has_keyword = ("역" in check_start_name or "지하" in check_start_name or "역" in check_end_name or "지하" in check_end_name)
@@ -115,7 +114,6 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                 path_coords = []
                 
                 if mode == "WALK":
-                    # 이전/다음이 지하철이거나, 양 끝점 이름에 역/지하가 들어가거나, 거리가 50m 미만이면 일직선 점선으로 강제 커트
                     if is_adjacent_to_subway or has_keyword or distance < 50:
                         start_lat = leg.get("start", {}).get("lat")
                         start_lon = leg.get("start", {}).get("lon")
@@ -150,9 +148,16 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                     else:
                         instruction = f"[{route_name}] {start_name} -> {end_name}"
 
+                # 핀과 선의 좌표를 완벽하게 일치시키는 강제 동기화 로직
+                if path_coords:
+                    if i == 0:
+                        path_coords[0] = Coordinate(latitude=start.latitude, longitude=start.longitude)
+                    if i == len(legs) - 1:
+                        path_coords[-1] = Coordinate(latitude=end.latitude, longitude=end.longitude)
+
                 if not path_coords:
-                    path_coords.append(Coordinate(latitude=float(leg.get("start", {}).get("lat", start.latitude)), longitude=float(leg.get("start", {}).get("lon", start.longitude))))
-                    path_coords.append(Coordinate(latitude=float(leg.get("end", {}).get("lat", end.latitude)), longitude=float(leg.get("end", {}).get("lon", end.longitude))))
+                    path_coords.append(Coordinate(latitude=start.latitude, longitude=start.longitude))
+                    path_coords.append(Coordinate(latitude=end.latitude, longitude=end.longitude))
 
                 segments.append(RouteSegment(
                     segmentType=mode,
