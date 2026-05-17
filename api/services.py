@@ -91,6 +91,35 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                     except ValueError:
                         pass
                 return coords
+
+            def trim_path(coords: list, start_lat: float, start_lon: float, end_lat: float, end_lon: float) -> list:
+                if not coords: return coords
+                
+                min_start_dist = float('inf')
+                start_idx = 0
+                for idx, pt in enumerate(coords):
+                    dist = (pt.latitude - start_lat)**2 + (pt.longitude - start_lon)**2
+                    if dist < min_start_dist:
+                        min_start_dist = dist
+                        start_idx = idx
+                        
+                min_end_dist = float('inf')
+                end_idx = len(coords) - 1
+                for idx, pt in enumerate(coords):
+                    dist = (pt.latitude - end_lat)**2 + (pt.longitude - end_lon)**2
+                    if dist < min_end_dist:
+                        min_end_dist = dist
+                        end_idx = idx
+                        
+                if start_idx <= end_idx:
+                    trimmed = coords[start_idx:end_idx+1]
+                else:
+                    trimmed = coords[end_idx:start_idx+1]
+                    trimmed.reverse()
+                    
+                trimmed[0] = Coordinate(latitude=start_lat, longitude=start_lon)
+                trimmed[-1] = Coordinate(latitude=end_lat, longitude=end_lon)
+                return trimmed
             
             for i, leg in enumerate(legs):
                 mode = leg.get("mode", "WALK")
@@ -150,23 +179,19 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
 
                 if path_coords:
                     if mode in ["BUS", "SUBWAY"]:
-                        # 대중교통 노선 꼬리 자르기: 진짜 정류장(stationList) 데이터 추출
                         station_list = leg.get("passStopList", {}).get("stationList", [])
                         if station_list:
                             first_station = station_list[0]
                             last_station = station_list[-1]
                             
-                            real_start_lat = first_station.get("lat")
-                            real_start_lon = first_station.get("lon")
-                            real_end_lat = last_station.get("lat")
-                            real_end_lon = last_station.get("lon")
+                            real_start_lat = float(first_station.get("lat", 0))
+                            real_start_lon = float(first_station.get("lon", 0))
+                            real_end_lat = float(last_station.get("lat", 0))
+                            real_end_lon = float(last_station.get("lon", 0))
                             
-                            if real_start_lat and real_start_lon:
-                                path_coords[0] = Coordinate(latitude=float(real_start_lat), longitude=float(real_start_lon))
-                            if real_end_lat and real_end_lon:
-                                path_coords[-1] = Coordinate(latitude=float(real_end_lat), longitude=float(real_end_lon))
+                            if real_start_lat != 0 and real_start_lon != 0 and real_end_lat != 0 and real_end_lon != 0:
+                                path_coords = trim_path(path_coords, real_start_lat, real_start_lon, real_end_lat, real_end_lon)
                     else:
-                        # 도보 구간 꼬리 자르기
                         leg_start_lat = leg.get("start", {}).get("lat")
                         leg_start_lon = leg.get("start", {}).get("lon")
                         leg_end_lat = leg.get("end", {}).get("lat")
@@ -177,7 +202,6 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                         if leg_end_lat and leg_end_lon:
                             path_coords[-1] = Coordinate(latitude=float(leg_end_lat), longitude=float(leg_end_lon))
 
-                    # 전체 탐색의 진짜 처음과 끝은 카카오 핀 좌표로 덮어씌움 (단, 도보일 때만)
                     if i == 0 and mode == "WALK":
                         path_coords[0] = Coordinate(latitude=start.latitude, longitude=start.longitude)
                     if i == len(legs) - 1 and mode == "WALK":
