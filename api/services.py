@@ -7,10 +7,11 @@ KAKAO_REST_API_KEY = os.environ.get("KAKAO_REST_API_KEY")
 TMAP_API_KEY = os.environ.get("TMAP_API_KEY")
 
 async def get_coords_from_kakao(place_name: str) -> tuple[float, float]:
-    url = "https://dapi.kakao.com/v2/local/search/keyword.json"
+    url = "[https://dapi.kakao.com/v2/local/search/keyword.json](https://dapi.kakao.com/v2/local/search/keyword.json)"
     headers = {"Authorization": f"KakaoAK {KAKAO_REST_API_KEY}"}
     params = {"query": place_name}
     
+    # Vercel 500 에러(UnsupportedProtocol) 방지용 trust_env=False 필수!
     async with httpx.AsyncClient(trust_env=False) as client:
         response = await client.get(url, headers=headers, params=params)
         if response.status_code == 200:
@@ -32,7 +33,7 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
             )]
         )
 
-    url = "https://apis.openapi.sk.com/transit/routes"
+    url = "[https://apis.openapi.sk.com/transit/routes](https://apis.openapi.sk.com/transit/routes)"
     headers = {
         "appKey": TMAP_API_KEY,
         "accept": "application/json",
@@ -130,12 +131,6 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                             path_coords.extend(parse_linestring(ls))
                             
                     instruction = f"도보 이동 ({distance}m)"
-
-                    if path_coords:
-                        if i == 0:
-                            path_coords[0] = Coordinate(latitude=start.latitude, longitude=start.longitude)
-                        if i == len(legs) - 1:
-                            path_coords[-1] = Coordinate(latitude=end.latitude, longitude=end.longitude)
                 else:
                     pass_shape = leg.get("passShape")
                     ls = ""
@@ -154,9 +149,30 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                     else:
                         instruction = f"[{route_name}] {start_name} -> {end_name}"
 
+                if path_coords:
+                    # 1. 버스/지하철일 경우: 중간에 튀어나가는 꼬리를 자르고 '실제 정류장' 좌표로 먼저 덮어쓰기
+                    if mode in ["BUS", "SUBWAY"]:
+                        station_list = leg.get("passStopList", {}).get("stationList", [])
+                        if station_list:
+                            real_start_lat = station_list[0].get("lat")
+                            real_start_lon = station_list[0].get("lon")
+                            real_end_lat = station_list[-1].get("lat")
+                            real_end_lon = station_list[-1].get("lon")
+                            
+                            if real_start_lat and real_start_lon:
+                                path_coords[0] = Coordinate(latitude=float(real_start_lat), longitude=float(real_start_lon))
+                            if real_end_lat and real_end_lon:
+                                path_coords[-1] = Coordinate(latitude=float(real_end_lat), longitude=float(real_end_lon))
+
+                    # 2. [가장 핵심] 도보든 버스든 상관없이! 첫 구간과 마지막 구간은 무조건 사용자가 꽂은 카카오 핀 좌표로 덮어쓰기!
+                    if i == 0:
+                        path_coords[0] = Coordinate(latitude=start.latitude, longitude=start.longitude)
+                    if i == len(legs) - 1:
+                        path_coords[-1] = Coordinate(latitude=end.latitude, longitude=end.longitude)
+
                 if not path_coords:
-                    path_coords.append(Coordinate(latitude=float(leg.get("start", {}).get("lat", start.latitude)), longitude=float(leg.get("start", {}).get("lon", start.longitude))))
-                    path_coords.append(Coordinate(latitude=float(leg.get("end", {}).get("lat", end.latitude)), longitude=float(leg.get("end", {}).get("lon", end.longitude))))
+                    path_coords.append(Coordinate(latitude=start.latitude, longitude=start.longitude))
+                    path_coords.append(Coordinate(latitude=end.latitude, longitude=end.longitude))
 
                 segments.append(RouteSegment(
                     segmentType=mode,
