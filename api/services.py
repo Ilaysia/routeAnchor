@@ -1,6 +1,5 @@
 import os
 import httpx
-import traceback
 from fastapi import HTTPException
 from api.schemas import RouteRequest, RouteResponse, RouteSegment, LocationPoint, Coordinate
 
@@ -9,28 +8,6 @@ for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'all_proxy
 
 KAKAO_REST_API_KEY = os.environ.get("KAKAO_REST_API_KEY")
 TMAP_API_KEY = os.environ.get("TMAP_API_KEY")
-
-def slice_path_to_pin(coords: list, target_lat: float, target_lon: float, is_start: bool) -> list:
-    if not coords: return coords
-    
-    min_dist = float('inf')
-    closest_idx = 0
-    for idx, pt in enumerate(coords):
-        dist = (pt.latitude - target_lat)**2 + (pt.longitude - target_lon)**2
-        if dist < min_dist:
-            min_dist = dist
-            closest_idx = idx
-            
-    if is_start:
-        trimmed = coords[closest_idx:]
-        if trimmed:
-            trimmed[0] = Coordinate(latitude=target_lat, longitude=target_lon)
-        return trimmed
-    else:
-        trimmed = coords[:closest_idx+1]
-        if trimmed:
-            trimmed[-1] = Coordinate(latitude=target_lat, longitude=target_lon)
-        return trimmed
 
 async def get_coords_from_kakao(place_name: str) -> tuple[float, float]:
     url = "[https://dapi.kakao.com/v2/local/search/keyword.json](https://dapi.kakao.com/v2/local/search/keyword.json)"
@@ -176,39 +153,13 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                     else:
                         instruction = f"[{route_name}] {start_name} -> {end_name}"
 
-                if path_coords:
-                    if mode in ["BUS", "SUBWAY"]:
-                        station_list = leg.get("passStopList", {}).get("stationList", [])
-                        if station_list:
-                            s_lat = float(station_list[0].get("lat", 0))
-                            s_lon = float(station_list[0].get("lon", 0))
-                            e_lat = float(station_list[-1].get("lat", 0))
-                            e_lon = float(station_list[-1].get("lon", 0))
-                            
-                            if s_lat != 0 and s_lon != 0:
-                                path_coords = slice_path_to_pin(path_coords, s_lat, s_lon, True)
-                            if e_lat != 0 and e_lon != 0:
-                                path_coords = slice_path_to_pin(path_coords, e_lat, e_lon, False)
-
-                    if i == 0:
-                        path_coords = slice_path_to_pin(path_coords, start.latitude, start.longitude, True)
-                    if i == len(legs) - 1:
-                        path_coords = slice_path_to_pin(path_coords, end.latitude, end.longitude, False)
-
                 if not path_coords:
                     s_dict = leg.get("start") or {}
                     e_dict = leg.get("end") or {}
-                    
-                    s_lat = s_dict.get("lat")
-                    s_lon = s_dict.get("lon")
-                    e_lat = e_dict.get("lat")
-                    e_lon = e_dict.get("lon")
-                    
-                    s_lat = float(s_lat) if s_lat else start.latitude
-                    s_lon = float(s_lon) if s_lon else start.longitude
-                    e_lat = float(e_lat) if e_lat else end.latitude
-                    e_lon = float(e_lon) if e_lon else end.longitude
-                    
+                    s_lat = float(s_dict.get("lat")) if s_dict.get("lat") else start.latitude
+                    s_lon = float(s_dict.get("lon")) if s_dict.get("lon") else start.longitude
+                    e_lat = float(e_dict.get("lat")) if e_dict.get("lat") else end.latitude
+                    e_lon = float(e_dict.get("lon")) if e_dict.get("lon") else end.longitude
                     path_coords.append(Coordinate(latitude=s_lat, longitude=s_lon))
                     path_coords.append(Coordinate(latitude=e_lat, longitude=e_lon))
 
@@ -227,13 +178,14 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                 totalTimeMin=total_time,
                 totalFareWon=total_fare,
                 totalWalkDistanceMeter=total_walk,
-                segments=segments
+                segments=segments,
+                startCoordinate=Coordinate(latitude=start.latitude, longitude=start.longitude),
+                endCoordinate=Coordinate(latitude=end.latitude, longitude=end.longitude)
             )
             
         except Exception as e:
-            err_msg = traceback.format_exc()
-            print(f"CRITICAL PARSE ERROR: {err_msg}")
-            raise HTTPException(status_code=500, detail=f"TMAP 데이터 파싱 에러: {str(e)}")
+            print(f"TMAP 파싱 에러 상세: {e}")
+            raise HTTPException(status_code=500, detail=f"TMAP 데이터 구조 파싱 실패: {e}")
 
 async def process_optimized_route(request: RouteRequest) -> RouteResponse:
     all_points = [request.startPoint] + request.anchorPoints + [request.endPoint]
@@ -243,7 +195,6 @@ async def process_optimized_route(request: RouteRequest) -> RouteResponse:
             lon, lat = await get_coords_from_kakao(point.name)
             point.longitude = lon
             point.latitude = lat
-            print(f"[{point.name}] 좌표 변환 완료: 위도 {lat}, 경도 {lon}")
 
     total_time = 0
     total_fare = 0
