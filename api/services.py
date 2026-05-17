@@ -22,7 +22,6 @@ async def get_coords_from_kakao(place_name: str) -> tuple[float, float]:
     raise HTTPException(status_code=400, detail=f"'{place_name}' 장소를 찾을 수 없습니다.")
 
 async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_type: str) -> RouteResponse:
-    # 500 에러 방지: 출발지와 도착지가 완전히 동일한 경우 바로 직선 응답
     if start.latitude == end.latitude and start.longitude == end.longitude:
         return RouteResponse(
             totalTimeMin=0, totalFareWon=0, totalWalkDistanceMeter=0,
@@ -33,14 +32,13 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
             )]
         )
 
-    url = "https://apis.openapi.sk.com/transit/routes"
+    url = "https://apis.openapi.sk.com/transit/routes/"
     headers = {
         "appKey": TMAP_API_KEY,
         "accept": "application/json",
         "content-type": "application/json"
     }
     
-    # 500 에러 방지: lang 파라미터 추가 및 좌표값 문자열 캐스팅 확인
     payload = {
         "startX": str(start.longitude),
         "startY": str(start.latitude),
@@ -80,6 +78,20 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
             
             segments = []
             
+            def parse_linestring(ls_str: str) -> list:
+                if not ls_str or not isinstance(ls_str, str): return []
+                # 쉼표를 전부 공백으로 바꾼 뒤, 띄어쓰기 기준으로 다 쪼개고 무조건 2개씩 짝지어서 위경도로 추출
+                pts = ls_str.replace(",", " ").split()
+                coords = []
+                for j in range(0, len(pts)-1, 2):
+                    try:
+                        lon = float(pts[j])
+                        lat = float(pts[j+1])
+                        coords.append(Coordinate(latitude=lat, longitude=lon))
+                    except ValueError:
+                        pass
+                return coords
+            
             for leg in best_path.get("legs", []):
                 mode = leg.get("mode", "WALK")
                 if mode == "EXPRESSBUS":
@@ -93,20 +105,18 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                 
                 if mode == "WALK":
                     for step in leg.get("steps", []):
-                        ls = step.get("linestring", "")
-                        if ls:
-                            for pt in ls.split(" "):
-                                if "," in pt:
-                                    lon, lat = pt.split(",")
-                                    path_coords.append(Coordinate(latitude=float(lat), longitude=float(lon)))
+                        ls = step.get("linestring", "") or step.get("lineString", "")
+                        path_coords.extend(parse_linestring(ls))
                     instruction = f"도보 이동 ({leg.get('distance', 0)}m)"
                 else:
-                    ls = leg.get("passShape", {}).get("linestring", "")
-                    if ls:
-                        for pt in ls.split(" "):
-                            if "," in pt:
-                                lon, lat = pt.split(",")
-                                path_coords.append(Coordinate(latitude=float(lat), longitude=float(lon)))
+                    pass_shape = leg.get("passShape")
+                    ls = ""
+                    if isinstance(pass_shape, dict):
+                        ls = pass_shape.get("linestring", "") or pass_shape.get("lineString", "")
+                    elif isinstance(pass_shape, str):
+                        ls = pass_shape
+                        
+                    path_coords.extend(parse_linestring(ls))
                                 
                     route_name = leg.get("route", "대중교통")
                     if mode == "BUS":
@@ -116,7 +126,6 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                     else:
                         instruction = f"[{route_name}] {start_name} -> {end_name}"
 
-                # 파싱 데이터가 없을 경우 양 끝점이라도 강제로 이어주는 방어막
                 if not path_coords:
                     path_coords.append(Coordinate(latitude=float(leg.get("start", {}).get("lat", start.latitude)), longitude=float(leg.get("start", {}).get("lon", start.longitude))))
                     path_coords.append(Coordinate(latitude=float(leg.get("end", {}).get("lat", end.latitude)), longitude=float(leg.get("end", {}).get("lon", end.longitude))))
