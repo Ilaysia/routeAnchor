@@ -7,11 +7,11 @@ KAKAO_REST_API_KEY = os.environ.get("KAKAO_REST_API_KEY")
 TMAP_API_KEY = os.environ.get("TMAP_API_KEY")
 
 async def get_coords_from_kakao(place_name: str) -> tuple[float, float]:
-    url = "[https://dapi.kakao.com/v2/local/search/keyword.json](https://dapi.kakao.com/v2/local/search/keyword.json)"
+    url = "https://dapi.kakao.com/v2/local/search/keyword.json"
     headers = {"Authorization": f"KakaoAK {KAKAO_REST_API_KEY}"}
     params = {"query": place_name}
     
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(trust_env=False) as client:
         response = await client.get(url, headers=headers, params=params)
         if response.status_code == 200:
             data = response.json()
@@ -32,7 +32,7 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
             )]
         )
 
-    url = "[https://apis.openapi.sk.com/transit/routes](https://apis.openapi.sk.com/transit/routes)"
+    url = "https://apis.openapi.sk.com/transit/routes"
     headers = {
         "appKey": TMAP_API_KEY,
         "accept": "application/json",
@@ -49,7 +49,7 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
         "format": "json"
     }
     
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(trust_env=False) as client:
         response = await client.post(url, headers=headers, json=payload)
         
         if response.status_code != 200:
@@ -114,7 +114,6 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                 path_coords = []
                 
                 if mode == "WALK":
-                    # 도보 구간: 지하철 인접이거나, 이름에 지하/역이 포함되거나, 50m 미만이면 양 끝점 2개만 추출하여 일직선 점선 처리
                     if is_adjacent_to_subway or has_keyword or distance < 50:
                         start_lat = leg.get("start", {}).get("lat")
                         start_lon = leg.get("start", {}).get("lon")
@@ -132,14 +131,12 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                             
                     instruction = f"도보 이동 ({distance}m)"
 
-                    # 도보 구간일 때만 전체 경로의 시작 핀, 도착 핀 위치와 강제 동기화 (앱에서 핀과 선이 딱 붙게 만듦)
                     if path_coords:
                         if i == 0:
                             path_coords[0] = Coordinate(latitude=start.latitude, longitude=start.longitude)
                         if i == len(legs) - 1:
                             path_coords[-1] = Coordinate(latitude=end.latitude, longitude=end.longitude)
                 else:
-                    # 버스, 지하철 등 대중교통: 원본 선(passShape)을 조작하지 않고 그대로 사용하여 도로 굴곡 완벽 보존
                     pass_shape = leg.get("passShape")
                     ls = ""
                     if isinstance(pass_shape, dict):
