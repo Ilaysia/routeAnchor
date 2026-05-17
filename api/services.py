@@ -3,6 +3,9 @@ import httpx
 from fastapi import HTTPException
 from api.schemas import RouteRequest, RouteResponse, RouteSegment, LocationPoint, Coordinate
 
+for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY']:
+    os.environ.pop(key, None)
+
 KAKAO_REST_API_KEY = os.environ.get("KAKAO_REST_API_KEY")
 TMAP_API_KEY = os.environ.get("TMAP_API_KEY")
 
@@ -11,8 +14,7 @@ async def get_coords_from_kakao(place_name: str) -> tuple[float, float]:
     headers = {"Authorization": f"KakaoAK {KAKAO_REST_API_KEY}"}
     params = {"query": place_name}
     
-    # Vercel 500 에러(UnsupportedProtocol) 방지용 trust_env=False 필수!
-    async with httpx.AsyncClient(trust_env=False) as client:
+    async with httpx.AsyncClient(trust_env=False, proxies=None) as client:
         response = await client.get(url, headers=headers, params=params)
         if response.status_code == 200:
             data = response.json()
@@ -50,7 +52,7 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
         "format": "json"
     }
     
-    async with httpx.AsyncClient(trust_env=False) as client:
+    async with httpx.AsyncClient(trust_env=False, proxies=None) as client:
         response = await client.post(url, headers=headers, json=payload)
         
         if response.status_code != 200:
@@ -150,7 +152,6 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                         instruction = f"[{route_name}] {start_name} -> {end_name}"
 
                 if path_coords:
-                    # 1. 버스/지하철일 경우: 중간에 튀어나가는 꼬리를 자르고 '실제 정류장' 좌표로 먼저 덮어쓰기
                     if mode in ["BUS", "SUBWAY"]:
                         station_list = leg.get("passStopList", {}).get("stationList", [])
                         if station_list:
@@ -164,7 +165,6 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                             if real_end_lat and real_end_lon:
                                 path_coords[-1] = Coordinate(latitude=float(real_end_lat), longitude=float(real_end_lon))
 
-                    # 2. [가장 핵심] 도보든 버스든 상관없이! 첫 구간과 마지막 구간은 무조건 사용자가 꽂은 카카오 핀 좌표로 덮어쓰기!
                     if i == 0:
                         path_coords[0] = Coordinate(latitude=start.latitude, longitude=start.longitude)
                     if i == len(legs) - 1:
