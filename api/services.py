@@ -148,8 +148,19 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                     else:
                         instruction = f"[{route_name}] {start_name} -> {end_name}"
 
-                # 핵심 수정 부분: mode가 "WALK"일 때만 핀 좌표로 동기화!
                 if path_coords:
+                    # 1. 꼬리 자르기: 모든 구간(대중교통 포함)의 양 끝을 실제 TMAP 정류장/출발점 좌표로 강제 고정
+                    leg_start_lat = leg.get("start", {}).get("lat")
+                    leg_start_lon = leg.get("start", {}).get("lon")
+                    leg_end_lat = leg.get("end", {}).get("lat")
+                    leg_end_lon = leg.get("end", {}).get("lon")
+                    
+                    if leg_start_lat and leg_start_lon:
+                        path_coords[0] = Coordinate(latitude=float(leg_start_lat), longitude=float(leg_start_lon))
+                    if leg_end_lat and leg_end_lon:
+                        path_coords[-1] = Coordinate(latitude=float(leg_end_lat), longitude=float(leg_end_lon))
+
+                    # 2. 전체 탐색의 진짜 처음과 끝은 카카오 핀 좌표로 덮어씌움 (단, 도보일 때만)
                     if i == 0 and mode == "WALK":
                         path_coords[0] = Coordinate(latitude=start.latitude, longitude=start.longitude)
                     if i == len(legs) - 1 and mode == "WALK":
