@@ -3,6 +3,7 @@ import httpx
 from fastapi import HTTPException
 from api.schemas import RouteRequest, RouteResponse, RouteSegment, LocationPoint, Coordinate
 
+# Vercel 환경의 강제 프록시 환경변수(에러 원인)를 런타임에서 안전하게 삭제
 for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY']:
     os.environ.pop(key, None)
 
@@ -10,11 +11,12 @@ KAKAO_REST_API_KEY = os.environ.get("KAKAO_REST_API_KEY")
 TMAP_API_KEY = os.environ.get("TMAP_API_KEY")
 
 async def get_coords_from_kakao(place_name: str) -> tuple[float, float]:
-    url = "[https://dapi.kakao.com/v2/local/search/keyword.json](https://dapi.kakao.com/v2/local/search/keyword.json)"
+    url = "https://dapi.kakao.com/v2/local/search/keyword.json"
     headers = {"Authorization": f"KakaoAK {KAKAO_REST_API_KEY}"}
     params = {"query": place_name}
     
-    async with httpx.AsyncClient(trust_env=False, proxies=None) as client:
+    # proxies 옵션 제거 (최신 httpx에서 에러 유발), trust_env=False만 유지
+    async with httpx.AsyncClient(trust_env=False) as client:
         response = await client.get(url, headers=headers, params=params)
         if response.status_code == 200:
             data = response.json()
@@ -35,7 +37,7 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
             )]
         )
 
-    url = "[https://apis.openapi.sk.com/transit/routes](https://apis.openapi.sk.com/transit/routes)"
+    url = "https://apis.openapi.sk.com/transit/routes"
     headers = {
         "appKey": TMAP_API_KEY,
         "accept": "application/json",
@@ -52,7 +54,7 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
         "format": "json"
     }
     
-    async with httpx.AsyncClient(trust_env=False, proxies=None) as client:
+    async with httpx.AsyncClient(trust_env=False) as client:
         response = await client.post(url, headers=headers, json=payload)
         
         if response.status_code != 200:
