@@ -3,17 +3,19 @@ import httpx
 from fastapi import HTTPException
 from api.schemas import RouteRequest, RouteResponse, RouteSegment, LocationPoint, Coordinate
 
-for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY']:
+# Vercel 환경의 강제 프록시 환경변수(에러 원인)를 런타임에서 안전하게 삭제
+for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY']:
     os.environ.pop(key, None)
 
 KAKAO_REST_API_KEY = os.environ.get("KAKAO_REST_API_KEY")
 TMAP_API_KEY = os.environ.get("TMAP_API_KEY")
 
 async def get_coords_from_kakao(place_name: str) -> tuple[float, float]:
-    url = "[https://dapi.kakao.com/v2/local/search/keyword.json](https://dapi.kakao.com/v2/local/search/keyword.json)"
+    url = "https://dapi.kakao.com/v2/local/search/keyword.json"
     headers = {"Authorization": f"KakaoAK {KAKAO_REST_API_KEY}"}
     params = {"query": place_name}
     
+    # proxies 옵션 제거 (최신 httpx에서 에러 유발), trust_env=False만 유지
     async with httpx.AsyncClient(trust_env=False) as client:
         response = await client.get(url, headers=headers, params=params)
         if response.status_code == 200:
@@ -35,7 +37,7 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
             )]
         )
 
-    url = "[https://apis.openapi.sk.com/transit/routes](https://apis.openapi.sk.com/transit/routes)"
+    url = "https://apis.openapi.sk.com/transit/routes"
     headers = {
         "appKey": TMAP_API_KEY,
         "accept": "application/json",
@@ -118,12 +120,10 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                 
                 if mode == "WALK":
                     if is_adjacent_to_subway or has_keyword or distance < 50:
-                        s_dict = leg.get("start") or {}
-                        e_dict = leg.get("end") or {}
-                        start_lat = s_dict.get("lat")
-                        start_lon = s_dict.get("lon")
-                        end_lat = e_dict.get("lat")
-                        end_lon = e_dict.get("lon")
+                        start_lat = leg.get("start", {}).get("lat")
+                        start_lon = leg.get("start", {}).get("lon")
+                        end_lat = leg.get("end", {}).get("lat")
+                        end_lon = leg.get("end", {}).get("lon")
                         
                         if start_lat and start_lon:
                             path_coords.append(Coordinate(latitude=float(start_lat), longitude=float(start_lon)))
@@ -153,15 +153,28 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                     else:
                         instruction = f"[{route_name}] {start_name} -> {end_name}"
 
+                if path_coords:
+                    if mode in ["BUS", "SUBWAY"]:
+                        station_list = leg.get("passStopList", {}).get("stationList", [])
+                        if station_list:
+                            real_start_lat = station_list[0].get("lat")
+                            real_start_lon = station_list[0].get("lon")
+                            real_end_lat = station_list[-1].get("lat")
+                            real_end_lon = station_list[-1].get("lon")
+                            
+                            if real_start_lat and real_start_lon:
+                                path_coords[0] = Coordinate(latitude=float(real_start_lat), longitude=float(real_start_lon))
+                            if real_end_lat and real_end_lon:
+                                path_coords[-1] = Coordinate(latitude=float(real_end_lat), longitude=float(real_end_lon))
+
+                    if i == 0:
+                        path_coords[0] = Coordinate(latitude=start.latitude, longitude=start.longitude)
+                    if i == len(legs) - 1:
+                        path_coords[-1] = Coordinate(latitude=end.latitude, longitude=end.longitude)
+
                 if not path_coords:
-                    s_dict = leg.get("start") or {}
-                    e_dict = leg.get("end") or {}
-                    s_lat = float(s_dict.get("lat")) if s_dict.get("lat") else start.latitude
-                    s_lon = float(s_dict.get("lon")) if s_dict.get("lon") else start.longitude
-                    e_lat = float(e_dict.get("lat")) if e_dict.get("lat") else end.latitude
-                    e_lon = float(e_dict.get("lon")) if e_dict.get("lon") else end.longitude
-                    path_coords.append(Coordinate(latitude=s_lat, longitude=s_lon))
-                    path_coords.append(Coordinate(latitude=e_lat, longitude=e_lon))
+                    path_coords.append(Coordinate(latitude=start.latitude, longitude=start.longitude))
+                    path_coords.append(Coordinate(latitude=end.latitude, longitude=end.longitude))
 
                 segments.append(RouteSegment(
                     segmentType=mode,
@@ -178,13 +191,11 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                 totalTimeMin=total_time,
                 totalFareWon=total_fare,
                 totalWalkDistanceMeter=total_walk,
-                segments=segments,
-                startCoordinate=Coordinate(latitude=start.latitude, longitude=start.longitude),
-                endCoordinate=Coordinate(latitude=end.latitude, longitude=end.longitude)
+                segments=segments
             )
             
         except Exception as e:
-            print(f"TMAP 파싱 에러 상세: {e}")
+            print(f"TMAP 파싱 에러 상세: {e}, 응답 원본: {data}")
             raise HTTPException(status_code=500, detail=f"TMAP 데이터 구조 파싱 실패: {e}")
 
 async def process_optimized_route(request: RouteRequest) -> RouteResponse:
@@ -195,6 +206,7 @@ async def process_optimized_route(request: RouteRequest) -> RouteResponse:
             lon, lat = await get_coords_from_kakao(point.name)
             point.longitude = lon
             point.latitude = lat
+            print(f"[{point.name}] 좌표 변환 완료: 위도 {lat}, 경도 {lon}")
 
     total_time = 0
     total_fare = 0
