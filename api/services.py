@@ -7,7 +7,7 @@ KAKAO_REST_API_KEY = os.environ.get("KAKAO_REST_API_KEY")
 TMAP_API_KEY = os.environ.get("TMAP_API_KEY")
 
 async def get_coords_from_kakao(place_name: str) -> tuple[float, float]:
-    url = "https://dapi.kakao.com/v2/local/search/keyword.json"
+    url = "[https://dapi.kakao.com/v2/local/search/keyword.json](https://dapi.kakao.com/v2/local/search/keyword.json)"
     headers = {"Authorization": f"KakaoAK {KAKAO_REST_API_KEY}"}
     params = {"query": place_name}
     
@@ -32,7 +32,7 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
             )]
         )
 
-    url = "https://apis.openapi.sk.com/transit/routes"
+    url = "[https://apis.openapi.sk.com/transit/routes](https://apis.openapi.sk.com/transit/routes)"
     headers = {
         "appKey": TMAP_API_KEY,
         "accept": "application/json",
@@ -91,35 +91,6 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                     except ValueError:
                         pass
                 return coords
-
-            def trim_path(coords: list, start_lat: float, start_lon: float, end_lat: float, end_lon: float) -> list:
-                if not coords: return coords
-                
-                min_start_dist = float('inf')
-                start_idx = 0
-                for idx, pt in enumerate(coords):
-                    dist = (pt.latitude - start_lat)**2 + (pt.longitude - start_lon)**2
-                    if dist < min_start_dist:
-                        min_start_dist = dist
-                        start_idx = idx
-                        
-                min_end_dist = float('inf')
-                end_idx = len(coords) - 1
-                for idx, pt in enumerate(coords):
-                    dist = (pt.latitude - end_lat)**2 + (pt.longitude - end_lon)**2
-                    if dist < min_end_dist:
-                        min_end_dist = dist
-                        end_idx = idx
-                        
-                if start_idx <= end_idx:
-                    trimmed = coords[start_idx:end_idx+1]
-                else:
-                    trimmed = coords[end_idx:start_idx+1]
-                    trimmed.reverse()
-                    
-                trimmed[0] = Coordinate(latitude=start_lat, longitude=start_lon)
-                trimmed[-1] = Coordinate(latitude=end_lat, longitude=end_lon)
-                return trimmed
             
             for i, leg in enumerate(legs):
                 mode = leg.get("mode", "WALK")
@@ -143,6 +114,7 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                 path_coords = []
                 
                 if mode == "WALK":
+                    # 도보 구간: 지하철 인접이거나, 이름에 지하/역이 포함되거나, 50m 미만이면 양 끝점 2개만 추출하여 일직선 점선 처리
                     if is_adjacent_to_subway or has_keyword or distance < 50:
                         start_lat = leg.get("start", {}).get("lat")
                         start_lon = leg.get("start", {}).get("lon")
@@ -159,7 +131,15 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                             path_coords.extend(parse_linestring(ls))
                             
                     instruction = f"도보 이동 ({distance}m)"
+
+                    # 도보 구간일 때만 전체 경로의 시작 핀, 도착 핀 위치와 강제 동기화 (앱에서 핀과 선이 딱 붙게 만듦)
+                    if path_coords:
+                        if i == 0:
+                            path_coords[0] = Coordinate(latitude=start.latitude, longitude=start.longitude)
+                        if i == len(legs) - 1:
+                            path_coords[-1] = Coordinate(latitude=end.latitude, longitude=end.longitude)
                 else:
+                    # 버스, 지하철 등 대중교통: 원본 선(passShape)을 조작하지 않고 그대로 사용하여 도로 굴곡 완벽 보존
                     pass_shape = leg.get("passShape")
                     ls = ""
                     if isinstance(pass_shape, dict):
@@ -177,39 +157,9 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                     else:
                         instruction = f"[{route_name}] {start_name} -> {end_name}"
 
-                if path_coords:
-                    if mode in ["BUS", "SUBWAY"]:
-                        station_list = leg.get("passStopList", {}).get("stationList", [])
-                        if station_list:
-                            first_station = station_list[0]
-                            last_station = station_list[-1]
-                            
-                            real_start_lat = float(first_station.get("lat", 0))
-                            real_start_lon = float(first_station.get("lon", 0))
-                            real_end_lat = float(last_station.get("lat", 0))
-                            real_end_lon = float(last_station.get("lon", 0))
-                            
-                            if real_start_lat != 0 and real_start_lon != 0 and real_end_lat != 0 and real_end_lon != 0:
-                                path_coords = trim_path(path_coords, real_start_lat, real_start_lon, real_end_lat, real_end_lon)
-                    else:
-                        leg_start_lat = leg.get("start", {}).get("lat")
-                        leg_start_lon = leg.get("start", {}).get("lon")
-                        leg_end_lat = leg.get("end", {}).get("lat")
-                        leg_end_lon = leg.get("end", {}).get("lon")
-                        
-                        if leg_start_lat and leg_start_lon:
-                            path_coords[0] = Coordinate(latitude=float(leg_start_lat), longitude=float(leg_start_lon))
-                        if leg_end_lat and leg_end_lon:
-                            path_coords[-1] = Coordinate(latitude=float(leg_end_lat), longitude=float(leg_end_lon))
-
-                    if i == 0 and mode == "WALK":
-                        path_coords[0] = Coordinate(latitude=start.latitude, longitude=start.longitude)
-                    if i == len(legs) - 1 and mode == "WALK":
-                        path_coords[-1] = Coordinate(latitude=end.latitude, longitude=end.longitude)
-
                 if not path_coords:
-                    path_coords.append(Coordinate(latitude=start.latitude, longitude=start.longitude))
-                    path_coords.append(Coordinate(latitude=end.latitude, longitude=end.longitude))
+                    path_coords.append(Coordinate(latitude=float(leg.get("start", {}).get("lat", start.latitude)), longitude=float(leg.get("start", {}).get("lon", start.longitude))))
+                    path_coords.append(Coordinate(latitude=float(leg.get("end", {}).get("lat", end.latitude)), longitude=float(leg.get("end", {}).get("lon", end.longitude))))
 
                 segments.append(RouteSegment(
                     segmentType=mode,
