@@ -106,11 +106,17 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                 section_time = leg.get("sectionTime", 0) // 60
                 start_name = leg.get("start", {}).get("name", "출발")
                 end_name = leg.get("end", {}).get("name", "도착")
+
+                # 새로 추가된 강력한 이름 기반 필터링 (앵커포인트 끊김 방어용)
+                check_start_name = start.name if i == 0 else start_name
+                check_end_name = end.name if i == len(legs) - 1 else end_name
+                has_keyword = ("역" in check_start_name or "지하" in check_start_name or "역" in check_end_name or "지하" in check_end_name)
                 
                 path_coords = []
                 
                 if mode == "WALK":
-                    if is_adjacent_to_subway or distance < 50:
+                    # 이전/다음이 지하철이거나, 양 끝점 이름에 역/지하가 들어가거나, 거리가 50m 미만이면 일직선 점선으로 강제 커트
+                    if is_adjacent_to_subway or has_keyword or distance < 50:
                         start_lat = leg.get("start", {}).get("lat")
                         start_lon = leg.get("start", {}).get("lon")
                         end_lat = leg.get("end", {}).get("lat")
