@@ -148,11 +148,11 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                     else:
                         instruction = f"[{route_name}] {start_name} -> {end_name}"
 
-                # 핀과 선의 좌표를 완벽하게 일치시키는 강제 동기화 로직
+                # 핵심 수정 부분: mode가 "WALK"일 때만 핀 좌표로 동기화!
                 if path_coords:
-                    if i == 0:
+                    if i == 0 and mode == "WALK":
                         path_coords[0] = Coordinate(latitude=start.latitude, longitude=start.longitude)
-                    if i == len(legs) - 1:
+                    if i == len(legs) - 1 and mode == "WALK":
                         path_coords[-1] = Coordinate(latitude=end.latitude, longitude=end.longitude)
 
                 if not path_coords:
