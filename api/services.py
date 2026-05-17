@@ -4,7 +4,6 @@ from fastapi import HTTPException
 from api.schemas import RouteRequest, RouteResponse, RouteSegment, LocationPoint, Coordinate
 
 KAKAO_REST_API_KEY = os.environ.get("KAKAO_REST_API_KEY")
-ODSAY_API_KEY = os.environ.get("ODSAY_API_KEY")
 TMAP_API_KEY = os.environ.get("TMAP_API_KEY")
 
 async def get_coords_from_kakao(place_name: str) -> tuple[float, float]:
@@ -22,163 +21,113 @@ async def get_coords_from_kakao(place_name: str) -> tuple[float, float]:
                 return x, y
     raise HTTPException(status_code=400, detail=f"'{place_name}' 장소를 찾을 수 없습니다.")
 
-async def get_tmap_pedestrian_path(start_x, start_y, end_x, end_y) -> list:
-    if start_x == end_x and start_y == end_y:
-        return [Coordinate(latitude=float(start_y), longitude=float(start_x)),
-                Coordinate(latitude=float(end_y), longitude=float(end_x))]
+async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_type: str) -> RouteResponse:
+    # 500 에러 방지: 출발지와 도착지가 완전히 동일한 경우 바로 직선 응답
+    if start.latitude == end.latitude and start.longitude == end.longitude:
+        return RouteResponse(
+            totalTimeMin=0, totalFareWon=0, totalWalkDistanceMeter=0,
+            segments=[RouteSegment(
+                segmentType="WALK", instruction="도보 출발 및 도착", durationMin=0,
+                startLocationName=start.name, endLocationName=end.name,
+                pathCoordinates=[Coordinate(latitude=start.latitude, longitude=start.longitude)]
+            )]
+        )
 
-    url = "https://apis.openapi.sk.com/tmap/routes/pedestrian?version=1&format=json"
-    headers = {"appKey": TMAP_API_KEY}
-    payload = {
-        "startX": str(start_x), "startY": str(start_y),
-        "endX": str(end_x), "endY": str(end_y),
-        "reqCoordType": "WGS84GEO", "resCoordType": "WGS84GEO",
-        "startName": "출발", "endName": "도착"
+    url = "https://apis.openapi.sk.com/transit/routes"
+    headers = {
+        "appKey": TMAP_API_KEY,
+        "accept": "application/json",
+        "content-type": "application/json"
     }
     
-    try:
-        async with httpx.AsyncClient() as client:
-            res = await client.post(url, headers=headers, json=payload)
-            coords = []
-            if res.status_code == 200:
-                data = res.json()
-                for feature in data.get("features", []):
-                    geom = feature.get("geometry", {})
-                    gtype = geom.get("type")
-                    c_list = geom.get("coordinates", [])
-                    
-                    if gtype == "Point":
-                        coords.append(Coordinate(latitude=float(c_list[1]), longitude=float(c_list[0])))
-                    elif gtype == "LineString":
-                        for c in c_list:
-                            coords.append(Coordinate(latitude=float(c[1]), longitude=float(c[0])))
-            return coords
-    except Exception as e:
-        print(f"TMAP 보행자 API 통신 에러: {e}")
-        return []
-
-async def fetch_segment_from_odsay(start: LocationPoint, end: LocationPoint, opt_type: str) -> RouteResponse:
-    url = "https://api.odsay.com/v1/api/searchPubTransPathT"
-    params = {
-        "apiKey": ODSAY_API_KEY,
-        "SX": start.longitude, "SY": start.latitude,
-        "EX": end.longitude, "EY": end.latitude,
-        "SearchPathType": 0 
+    # 500 에러 방지: lang 파라미터 추가 및 좌표값 문자열 캐스팅 확인
+    payload = {
+        "startX": str(start.longitude),
+        "startY": str(start.latitude),
+        "endX": str(end.longitude),
+        "endY": str(end.latitude),
+        "count": 10,
+        "lang": 0,
+        "format": "json"
     }
     
     async with httpx.AsyncClient() as client:
-        response = await client.get(url, params=params)
+        response = await client.post(url, headers=headers, json=payload)
+        
+        if response.status_code != 200:
+            print(f"TMAP API 에러: {response.status_code} - {response.text}")
+            raise HTTPException(status_code=500, detail=f"TMAP 대중교통 API 통신 에러: HTTP {response.status_code}")
+            
         data = response.json()
-        if "error" in data:
-            raise HTTPException(status_code=400, detail=f"경로 탐색 실패: {data['error'].get('msg', '알 수 없는 오류')}")
-
+        
         try:
-            all_paths = data["result"]["path"]
+            itineraries = data["metaData"]["plan"]["itineraries"]
             
             if opt_type == "MIN_TIME":
-                all_paths.sort(key=lambda x: x["info"].get("totalTime", 999))
+                itineraries.sort(key=lambda x: x.get("totalTime", 999999))
             elif opt_type == "MIN_COST":
-                all_paths.sort(key=lambda x: x["info"].get("payment", 99999))
+                itineraries.sort(key=lambda x: x.get("fare", {}).get("regular", {}).get("totalFare", 999999))
             elif opt_type == "MIN_TRANSFER":
-                all_paths.sort(key=lambda x: x["info"].get("transitCount", 99))
+                itineraries.sort(key=lambda x: x.get("transferCount", 99))
             elif opt_type == "MIN_WALK":
-                all_paths.sort(key=lambda x: x["info"].get("totalWalk", 99999))
+                itineraries.sort(key=lambda x: x.get("totalWalkDistance", 999999))
 
-            best_path = all_paths[0]
-            info = best_path["info"]
+            best_path = itineraries[0]
             
-            map_obj = info.get("mapObj")
-            graphic_lanes = []
-            
-            if map_obj:
-                try:
-                    lane_url = "https://api.odsay.com/v1/api/loadLane"
-                    lane_params = {"apiKey": ODSAY_API_KEY, "mapObject": map_obj}
-                    
-                    lane_res = await client.get(lane_url, params=lane_params)
-                    if lane_res.status_code == 200:
-                        lane_data = lane_res.json()
-                        if "result" in lane_data and "lane" in lane_data["result"]:
-                            graphic_lanes = lane_data["result"]["lane"]
-                except Exception as e:
-                    print(f"ODsay loadLane 에러: {e}")
-            
-            total_time = info.get("totalTime", 0)
-            total_fare = info.get("payment", 0)
-            total_walk = info.get("totalWalk", 0)
+            total_time = best_path.get("totalTime", 0) // 60
+            total_fare = best_path.get("fare", {}).get("regular", {}).get("totalFare", 0)
+            total_walk = best_path.get("totalWalkDistance", 0)
             
             segments = []
-            lane_index = 0
             
-            for sub in best_path.get("subPath", []):
-                traffic_type = sub.get("trafficType")
-                station_id = None
+            for leg in best_path.get("legs", []):
+                mode = leg.get("mode", "WALK")
+                if mode == "EXPRESSBUS":
+                    mode = "BUS"
+                    
+                section_time = leg.get("sectionTime", 0) // 60
+                start_name = leg.get("start", {}).get("name", "출발")
+                end_name = leg.get("end", {}).get("name", "도착")
+                
                 path_coords = []
-
-                if traffic_type in (1, 2):
-                    if lane_index < len(graphic_lanes):
-                        try:
-                            lane_info = graphic_lanes[lane_index]
-                            for section in lane_info.get("section", []):
-                                for pos in section.get("graphPos", []):
-                                    if "x" in pos and "y" in pos:
-                                        path_coords.append(Coordinate(latitude=float(pos["y"]), longitude=float(pos["x"])))
-                        except Exception as e:
-                            print(f"그래픽 좌표 파싱 에러: {e}")
-                        lane_index += 1
-                    
-                    if not path_coords:
-                        pass_stop_list = sub.get("passStopList")
-                        if pass_stop_list and isinstance(pass_stop_list, dict):
-                            for station in pass_stop_list.get("stations", []):
-                                sx = station.get("x")
-                                sy = station.get("y")
-                                if sx and sy:
-                                    path_coords.append(Coordinate(latitude=float(sy), longitude=float(sx)))
-                    
-                    if not path_coords:
-                        sx = sub.get("startX")
-                        sy = sub.get("startY")
-                        ex = sub.get("endX")
-                        ey = sub.get("endY")
-                        if sx and sy and ex and ey:
-                            path_coords.append(Coordinate(latitude=float(sy), longitude=float(sx)))
-                            path_coords.append(Coordinate(latitude=float(ey), longitude=float(ex)))
-
-                elif traffic_type == 3:
-                    start_x = sub.get("startX")
-                    start_y = sub.get("startY")
-                    end_x = sub.get("endX")
-                    end_y = sub.get("endY")
-                    if start_x and start_y and end_x and end_y:
-                        walk_coords = await get_tmap_pedestrian_path(start_x, start_y, end_x, end_y)
-                        if walk_coords:
-                            path_coords.extend(walk_coords)
-                        else:
-                            path_coords.append(Coordinate(latitude=float(start_y), longitude=float(start_x)))
-                            path_coords.append(Coordinate(latitude=float(end_y), longitude=float(end_x)))
+                
+                if mode == "WALK":
+                    for step in leg.get("steps", []):
+                        ls = step.get("linestring", "")
+                        if ls:
+                            for pt in ls.split(" "):
+                                if "," in pt:
+                                    lon, lat = pt.split(",")
+                                    path_coords.append(Coordinate(latitude=float(lat), longitude=float(lon)))
+                    instruction = f"도보 이동 ({leg.get('distance', 0)}m)"
                 else:
-                    continue
+                    ls = leg.get("passShape", {}).get("linestring", "")
+                    if ls:
+                        for pt in ls.split(" "):
+                            if "," in pt:
+                                lon, lat = pt.split(",")
+                                path_coords.append(Coordinate(latitude=float(lat), longitude=float(lon)))
+                                
+                    route_name = leg.get("route", "대중교통")
+                    if mode == "BUS":
+                        instruction = f"[{route_name} 버스] {start_name} 승차 -> {end_name} 하차"
+                    elif mode == "SUBWAY":
+                        instruction = f"[{route_name}] {start_name} 승차 -> {end_name} 하차"
+                    else:
+                        instruction = f"[{route_name}] {start_name} -> {end_name}"
 
-                if traffic_type == 1:
-                    seg_type = "SUBWAY"
-                    instruction = f"[{sub['lane'][0]['name']}] {sub['startName']}역 승차 -> {sub['endName']}역 하차"
-                    station_id = str(sub.get("startID", ""))
-                elif traffic_type == 2:
-                    seg_type = "BUS"
-                    instruction = f"[{sub['lane'][0]['busNo']} 버스] {sub['startName']} 정류장 승차 -> {sub['endName']} 정류장 하차"
-                    station_id = str(sub.get("startID", ""))
-                elif traffic_type == 3:
-                    seg_type = "WALK"
-                    instruction = f"도보 이동 ({sub.get('distance', 0)}m)"
-                    
+                # 파싱 데이터가 없을 경우 양 끝점이라도 강제로 이어주는 방어막
+                if not path_coords:
+                    path_coords.append(Coordinate(latitude=float(leg.get("start", {}).get("lat", start.latitude)), longitude=float(leg.get("start", {}).get("lon", start.longitude))))
+                    path_coords.append(Coordinate(latitude=float(leg.get("end", {}).get("lat", end.latitude)), longitude=float(leg.get("end", {}).get("lon", end.longitude))))
+
                 segments.append(RouteSegment(
-                    segmentType=seg_type,
+                    segmentType=mode,
                     instruction=instruction,
-                    durationMin=sub.get("sectionTime", 0),
-                    startLocationName=sub.get("startName", "도보 출발"),
-                    endLocationName=sub.get("endName", "도보 도착"),
-                    stationId=station_id if station_id else None,
+                    durationMin=section_time,
+                    startLocationName=start_name,
+                    endLocationName=end_name,
+                    stationId=None,
                     realTimeArrivalInfo=None, 
                     pathCoordinates=path_coords
                 ))
@@ -191,8 +140,8 @@ async def fetch_segment_from_odsay(start: LocationPoint, end: LocationPoint, opt
             )
             
         except Exception as e:
-            print(f"데이터 파싱 에러: {e}")
-            raise HTTPException(status_code=500, detail=f"API 응답 구조 파싱 실패: {e}")
+            print(f"TMAP 파싱 에러 상세: {e}, 응답 원본: {data}")
+            raise HTTPException(status_code=500, detail=f"TMAP 데이터 구조 파싱 실패: {e}")
 
 async def process_optimized_route(request: RouteRequest) -> RouteResponse:
     all_points = [request.startPoint] + request.anchorPoints + [request.endPoint]
@@ -213,7 +162,7 @@ async def process_optimized_route(request: RouteRequest) -> RouteResponse:
         current_start = all_points[i]
         current_end = all_points[i+1]
         
-        segment_response = await fetch_segment_from_odsay(
+        segment_response = await fetch_segment_from_tmap(
             start=current_start,
             end=current_end,
             opt_type=request.optimizationType.value
