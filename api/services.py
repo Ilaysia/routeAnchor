@@ -3,7 +3,6 @@ import httpx
 from fastapi import HTTPException
 from api.schemas import RouteRequest, RouteResponse, RouteSegment, LocationPoint, Coordinate
 
-# Vercel 환경의 강제 프록시 환경변수(에러 원인)를 런타임에서 안전하게 삭제
 for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY']:
     os.environ.pop(key, None)
 
@@ -11,11 +10,10 @@ KAKAO_REST_API_KEY = os.environ.get("KAKAO_REST_API_KEY")
 TMAP_API_KEY = os.environ.get("TMAP_API_KEY")
 
 async def get_coords_from_kakao(place_name: str) -> tuple[float, float]:
-    url = "https://dapi.kakao.com/v2/local/search/keyword.json"
+    url = "[https://dapi.kakao.com/v2/local/search/keyword.json](https://dapi.kakao.com/v2/local/search/keyword.json)"
     headers = {"Authorization": f"KakaoAK {KAKAO_REST_API_KEY}"}
     params = {"query": place_name}
     
-    # proxies 옵션 제거 (최신 httpx에서 에러 유발), trust_env=False만 유지
     async with httpx.AsyncClient(trust_env=False) as client:
         response = await client.get(url, headers=headers, params=params)
         if response.status_code == 200:
@@ -37,7 +35,7 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
             )]
         )
 
-    url = "https://apis.openapi.sk.com/transit/routes"
+    url = "[https://apis.openapi.sk.com/transit/routes](https://apis.openapi.sk.com/transit/routes)"
     headers = {
         "appKey": TMAP_API_KEY,
         "accept": "application/json",
@@ -119,6 +117,7 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                 path_coords = []
                 
                 if mode == "WALK":
+                    # 무의미한 50m 이하 도보나 지하철 환승 도보만 일직선으로 처리
                     if is_adjacent_to_subway or has_keyword or distance < 50:
                         start_lat = leg.get("start", {}).get("lat")
                         start_lon = leg.get("start", {}).get("lon")
@@ -136,6 +135,7 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                             
                     instruction = f"도보 이동 ({distance}m)"
                 else:
+                    # 버스/지하철 구간: 어떤 조작도 하지 않고 원본 노선 데이터만 통과시킴
                     pass_shape = leg.get("passShape")
                     ls = ""
                     if isinstance(pass_shape, dict):
@@ -153,28 +153,11 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                     else:
                         instruction = f"[{route_name}] {start_name} -> {end_name}"
 
-                if path_coords:
-                    if mode in ["BUS", "SUBWAY"]:
-                        station_list = leg.get("passStopList", {}).get("stationList", [])
-                        if station_list:
-                            real_start_lat = station_list[0].get("lat")
-                            real_start_lon = station_list[0].get("lon")
-                            real_end_lat = station_list[-1].get("lat")
-                            real_end_lon = station_list[-1].get("lon")
-                            
-                            if real_start_lat and real_start_lon:
-                                path_coords[0] = Coordinate(latitude=float(real_start_lat), longitude=float(real_start_lon))
-                            if real_end_lat and real_end_lon:
-                                path_coords[-1] = Coordinate(latitude=float(real_end_lat), longitude=float(real_end_lon))
-
-                    if i == 0:
-                        path_coords[0] = Coordinate(latitude=start.latitude, longitude=start.longitude)
-                    if i == len(legs) - 1:
-                        path_coords[-1] = Coordinate(latitude=end.latitude, longitude=end.longitude)
+                # 🚨 문제의 원인이었던 "path_coords[0] 강제 덮어쓰기 로직" 완전 삭제!
 
                 if not path_coords:
-                    path_coords.append(Coordinate(latitude=start.latitude, longitude=start.longitude))
-                    path_coords.append(Coordinate(latitude=end.latitude, longitude=end.longitude))
+                    path_coords.append(Coordinate(latitude=float(leg.get("start", {}).get("lat", start.latitude)), longitude=float(leg.get("start", {}).get("lon", start.longitude))))
+                    path_coords.append(Coordinate(latitude=float(leg.get("end", {}).get("lat", end.latitude)), longitude=float(leg.get("end", {}).get("lon", end.longitude))))
 
                 segments.append(RouteSegment(
                     segmentType=mode,
