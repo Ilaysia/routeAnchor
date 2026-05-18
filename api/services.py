@@ -1,17 +1,53 @@
 import os
 import httpx
+import traceback
 from fastapi import HTTPException
 from api.schemas import RouteRequest, RouteResponse, RouteSegment, LocationPoint, Coordinate
 
+# Vercel 환경의 강제 프록시 변수 삭제 (500 에러 원천 차단)
+for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY']:
+    os.environ.pop(key, None)
+
 KAKAO_REST_API_KEY = os.environ.get("KAKAO_REST_API_KEY")
 TMAP_API_KEY = os.environ.get("TMAP_API_KEY")
+
+# 🚨 핵심: 버스/지하철 노선이 정류장 밖으로 튀어나가지 않게 실제 정류장 좌표 기준으로 잘라내는 함수
+def trim_path(coords: list, start_lat: float, start_lon: float, end_lat: float, end_lon: float) -> list:
+    if not coords: return coords
+    
+    min_start_dist = float('inf')
+    start_idx = 0
+    for idx, pt in enumerate(coords):
+        dist = (pt.latitude - start_lat)**2 + (pt.longitude - start_lon)**2
+        if dist < min_start_dist:
+            min_start_dist = dist
+            start_idx = idx
+            
+    min_end_dist = float('inf')
+    end_idx = len(coords) - 1
+    for idx, pt in enumerate(coords):
+        dist = (pt.latitude - end_lat)**2 + (pt.longitude - end_lon)**2
+        if dist < min_end_dist:
+            min_end_dist = dist
+            end_idx = idx
+            
+    if start_idx <= end_idx:
+        trimmed = coords[start_idx:end_idx+1]
+    else:
+        trimmed = coords[end_idx:start_idx+1]
+        trimmed.reverse()
+        
+    if trimmed:
+        trimmed[0] = Coordinate(latitude=start_lat, longitude=start_lon)
+        trimmed[-1] = Coordinate(latitude=end_lat, longitude=end_lon)
+    return trimmed
 
 async def get_coords_from_kakao(place_name: str) -> tuple[float, float]:
     url = "https://dapi.kakao.com/v2/local/search/keyword.json"
     headers = {"Authorization": f"KakaoAK {KAKAO_REST_API_KEY}"}
     params = {"query": place_name}
     
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(trust_env=False) as client:
         response = await client.get(url, headers=headers, params=params)
         if response.status_code == 200:
             data = response.json()
@@ -49,11 +85,10 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
         "format": "json"
     }
     
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(trust_env=False) as client:
         response = await client.post(url, headers=headers, json=payload)
         
         if response.status_code != 200:
-            print(f"TMAP API 에러: {response.status_code} - {response.text}")
             raise HTTPException(status_code=500, detail=f"TMAP 대중교통 API 통신 에러: HTTP {response.status_code}")
             
         data = response.json()
@@ -115,10 +150,12 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                 
                 if mode == "WALK":
                     if is_adjacent_to_subway or has_keyword or distance < 50:
-                        start_lat = leg.get("start", {}).get("lat")
-                        start_lon = leg.get("start", {}).get("lon")
-                        end_lat = leg.get("end", {}).get("lat")
-                        end_lon = leg.get("end", {}).get("lon")
+                        s_dict = leg.get("start") or {}
+                        e_dict = leg.get("end") or {}
+                        start_lat = s_dict.get("lat")
+                        start_lon = s_dict.get("lon")
+                        end_lat = e_dict.get("lat")
+                        end_lon = e_dict.get("lon")
                         
                         if start_lat and start_lon:
                             path_coords.append(Coordinate(latitude=float(start_lat), longitude=float(start_lon)))
@@ -149,26 +186,38 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                         instruction = f"[{route_name}] {start_name} -> {end_name}"
 
                 if path_coords:
-                    # 1. 꼬리 자르기: 모든 구간(대중교통 포함)의 양 끝을 실제 TMAP 정류장/출발점 좌표로 강제 고정
-                    leg_start_lat = leg.get("start", {}).get("lat")
-                    leg_start_lon = leg.get("start", {}).get("lon")
-                    leg_end_lat = leg.get("end", {}).get("lat")
-                    leg_end_lon = leg.get("end", {}).get("lon")
-                    
-                    if leg_start_lat and leg_start_lon:
-                        path_coords[0] = Coordinate(latitude=float(leg_start_lat), longitude=float(leg_start_lon))
-                    if leg_end_lat and leg_end_lon:
-                        path_coords[-1] = Coordinate(latitude=float(leg_end_lat), longitude=float(leg_end_lon))
-
-                    # 2. 전체 탐색의 진짜 처음과 끝은 카카오 핀 좌표로 덮어씌움 (단, 도보일 때만)
-                    if i == 0 and mode == "WALK":
-                        path_coords[0] = Coordinate(latitude=start.latitude, longitude=start.longitude)
-                    if i == len(legs) - 1 and mode == "WALK":
-                        path_coords[-1] = Coordinate(latitude=end.latitude, longitude=end.longitude)
+                    if mode in ["BUS", "SUBWAY"]:
+                        # 대중교통 노선이 정류장을 튀어나가지 않게 실제 정류장(passStopList) 기준으로 정확히 자름
+                        station_list = leg.get("passStopList", {}).get("stationList", [])
+                        if station_list:
+                            s_lat = float(station_list[0].get("lat", 0))
+                            s_lon = float(station_list[0].get("lon", 0))
+                            e_lat = float(station_list[-1].get("lat", 0))
+                            e_lon = float(station_list[-1].get("lon", 0))
+                            
+                            if s_lat != 0 and s_lon != 0 and e_lat != 0 and e_lon != 0:
+                                path_coords = trim_path(path_coords, s_lat, s_lon, e_lat, e_lon)
+                    else:
+                        # 도보 구간도 앞뒤 버스/지하철과 완벽히 물리게 강제 동기화
+                        s_dict = leg.get("start") or {}
+                        e_dict = leg.get("end") or {}
+                        s_lat = s_dict.get("lat")
+                        s_lon = s_dict.get("lon")
+                        e_lat = e_dict.get("lat")
+                        e_lon = e_dict.get("lon")
+                        if s_lat and s_lon and e_lat and e_lon:
+                            path_coords[0] = Coordinate(latitude=float(s_lat), longitude=float(s_lon))
+                            path_coords[-1] = Coordinate(latitude=float(e_lat), longitude=float(e_lon))
 
                 if not path_coords:
-                    path_coords.append(Coordinate(latitude=start.latitude, longitude=start.longitude))
-                    path_coords.append(Coordinate(latitude=end.latitude, longitude=end.longitude))
+                    s_dict = leg.get("start") or {}
+                    e_dict = leg.get("end") or {}
+                    s_lat = float(s_dict.get("lat")) if s_dict.get("lat") else start.latitude
+                    s_lon = float(s_dict.get("lon")) if s_dict.get("lon") else start.longitude
+                    e_lat = float(e_dict.get("lat")) if e_dict.get("lat") else end.latitude
+                    e_lon = float(e_dict.get("lon")) if e_dict.get("lon") else end.longitude
+                    path_coords.append(Coordinate(latitude=s_lat, longitude=s_lon))
+                    path_coords.append(Coordinate(latitude=e_lat, longitude=e_lon))
 
                 segments.append(RouteSegment(
                     segmentType=mode,
@@ -185,11 +234,14 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                 totalTimeMin=total_time,
                 totalFareWon=total_fare,
                 totalWalkDistanceMeter=total_walk,
-                segments=segments
+                segments=segments,
+                startCoordinate=Coordinate(latitude=start.latitude, longitude=start.longitude),
+                endCoordinate=Coordinate(latitude=end.latitude, longitude=end.longitude)
             )
             
         except Exception as e:
-            print(f"TMAP 파싱 에러 상세: {e}, 응답 원본: {data}")
+            err_msg = traceback.format_exc()
+            print(f"CRITICAL PARSE ERROR: {err_msg}")
             raise HTTPException(status_code=500, detail=f"TMAP 데이터 구조 파싱 실패: {e}")
 
 async def process_optimized_route(request: RouteRequest) -> RouteResponse:
@@ -200,7 +252,6 @@ async def process_optimized_route(request: RouteRequest) -> RouteResponse:
             lon, lat = await get_coords_from_kakao(point.name)
             point.longitude = lon
             point.latitude = lat
-            print(f"[{point.name}] 좌표 변환 완료: 위도 {lat}, 경도 {lon}")
 
     total_time = 0
     total_fare = 0
