@@ -4,43 +4,33 @@ import traceback
 from fastapi import HTTPException
 from api.schemas import RouteRequest, RouteResponse, RouteSegment, LocationPoint, Coordinate
 
-# Vercel 환경의 강제 프록시 변수 삭제 (500 에러 원천 차단)
 for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY']:
     os.environ.pop(key, None)
 
 KAKAO_REST_API_KEY = os.environ.get("KAKAO_REST_API_KEY")
 TMAP_API_KEY = os.environ.get("TMAP_API_KEY")
 
-# 🚨 핵심: 버스/지하철 노선이 정류장 밖으로 튀어나가지 않게 실제 정류장 좌표 기준으로 잘라내는 함수
-def trim_path(coords: list, start_lat: float, start_lon: float, end_lat: float, end_lon: float) -> list:
+def slice_path_to_pin(coords: list, target_lat: float, target_lon: float, is_start: bool) -> list:
     if not coords: return coords
     
-    min_start_dist = float('inf')
-    start_idx = 0
+    min_dist = float('inf')
+    closest_idx = 0
     for idx, pt in enumerate(coords):
-        dist = (pt.latitude - start_lat)**2 + (pt.longitude - start_lon)**2
-        if dist < min_start_dist:
-            min_start_dist = dist
-            start_idx = idx
+        dist = (pt.latitude - target_lat)**2 + (pt.longitude - target_lon)**2
+        if dist < min_dist:
+            min_dist = dist
+            closest_idx = idx
             
-    min_end_dist = float('inf')
-    end_idx = len(coords) - 1
-    for idx, pt in enumerate(coords):
-        dist = (pt.latitude - end_lat)**2 + (pt.longitude - end_lon)**2
-        if dist < min_end_dist:
-            min_end_dist = dist
-            end_idx = idx
-            
-    if start_idx <= end_idx:
-        trimmed = coords[start_idx:end_idx+1]
+    if is_start:
+        trimmed = coords[closest_idx:]
+        if trimmed:
+            trimmed[0] = Coordinate(latitude=target_lat, longitude=target_lon)
+        return trimmed
     else:
-        trimmed = coords[end_idx:start_idx+1]
-        trimmed.reverse()
-        
-    if trimmed:
-        trimmed[0] = Coordinate(latitude=start_lat, longitude=start_lon)
-        trimmed[-1] = Coordinate(latitude=end_lat, longitude=end_lon)
-    return trimmed
+        trimmed = coords[:closest_idx+1]
+        if trimmed:
+            trimmed[-1] = Coordinate(latitude=target_lat, longitude=target_lon)
+        return trimmed
 
 async def get_coords_from_kakao(place_name: str) -> tuple[float, float]:
     url = "https://dapi.kakao.com/v2/local/search/keyword.json"
@@ -89,7 +79,7 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
         response = await client.post(url, headers=headers, json=payload)
         
         if response.status_code != 200:
-            raise HTTPException(status_code=500, detail=f"TMAP 대중교통 API 통신 에러: HTTP {response.status_code}")
+            raise HTTPException(status_code=500, detail=f"TMAP API 에러: HTTP {response.status_code}")
             
         data = response.json()
         
@@ -187,18 +177,32 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
 
                 if path_coords:
                     if mode in ["BUS", "SUBWAY"]:
-                        # 대중교통 노선이 정류장을 튀어나가지 않게 실제 정류장(passStopList) 기준으로 정확히 자름
-                        station_list = leg.get("passStopList", {}).get("stationList", [])
-                        if station_list:
-                            s_lat = float(station_list[0].get("lat", 0))
-                            s_lon = float(station_list[0].get("lon", 0))
-                            e_lat = float(station_list[-1].get("lat", 0))
-                            e_lon = float(station_list[-1].get("lon", 0))
-                            
-                            if s_lat != 0 and s_lon != 0 and e_lat != 0 and e_lon != 0:
-                                path_coords = trim_path(path_coords, s_lat, s_lon, e_lat, e_lon)
+                        real_s_lat, real_s_lon = None, None
+                        real_e_lat, real_e_lon = None, None
+                        
+                        try:
+                            s_lon, s_lat = await get_coords_from_kakao(start_name)
+                            real_s_lat, real_s_lon = s_lat, s_lon
+                        except:
+                            station_list = leg.get("passStopList", {}).get("stationList", [])
+                            if station_list:
+                                real_s_lat = float(station_list[0].get("lat", 0))
+                                real_s_lon = float(station_list[0].get("lon", 0))
+                        
+                        try:
+                            e_lon, e_lat = await get_coords_from_kakao(end_name)
+                            real_e_lat, real_e_lon = e_lat, e_lon
+                        except:
+                            station_list = leg.get("passStopList", {}).get("stationList", [])
+                            if station_list:
+                                real_e_lat = float(station_list[-1].get("lat", 0))
+                                real_e_lon = float(station_list[-1].get("lon", 0))
+                                
+                        if real_s_lat and real_s_lon:
+                            path_coords = slice_path_to_pin(path_coords, real_s_lat, real_s_lon, True)
+                        if real_e_lat and real_e_lon:
+                            path_coords = slice_path_to_pin(path_coords, real_e_lat, real_e_lon, False)
                     else:
-                        # 도보 구간도 앞뒤 버스/지하철과 완벽히 물리게 강제 동기화
                         s_dict = leg.get("start") or {}
                         e_dict = leg.get("end") or {}
                         s_lat = s_dict.get("lat")
@@ -242,7 +246,7 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
         except Exception as e:
             err_msg = traceback.format_exc()
             print(f"CRITICAL PARSE ERROR: {err_msg}")
-            raise HTTPException(status_code=500, detail=f"TMAP 데이터 구조 파싱 실패: {e}")
+            raise HTTPException(status_code=500, detail=f"파싱 실패: {e}")
 
 async def process_optimized_route(request: RouteRequest) -> RouteResponse:
     all_points = [request.startPoint] + request.anchorPoints + [request.endPoint]
