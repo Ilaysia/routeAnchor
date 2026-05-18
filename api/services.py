@@ -102,8 +102,16 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                 
                 distance = leg.get("distance", 0)
                 section_time = leg.get("sectionTime", 0) // 60
-                start_name = leg.get("start", {}).get("name", "출발")
-                end_name = leg.get("end", {}).get("name", "도착")
+                
+                # 진짜 정류장/역/장소의 이름과 좌표 추출
+                s_dict = leg.get("start") or {}
+                e_dict = leg.get("end") or {}
+                start_name = s_dict.get("name", "출발")
+                end_name = e_dict.get("name", "도착")
+                s_lat = float(s_dict.get("lat")) if s_dict.get("lat") else start.latitude
+                s_lon = float(s_dict.get("lon")) if s_dict.get("lon") else start.longitude
+                e_lat = float(e_dict.get("lat")) if e_dict.get("lat") else end.latitude
+                e_lon = float(e_dict.get("lon")) if e_dict.get("lon") else end.longitude
                 
                 path_coords = []
                 
@@ -130,15 +138,15 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                     else:
                         instruction = f"[{route_name}] {start_name} -> {end_name}"
 
-                if not path_coords:
-                    s_dict = leg.get("start") or {}
-                    e_dict = leg.get("end") or {}
-                    s_lat = float(s_dict.get("lat")) if s_dict.get("lat") else start.latitude
-                    s_lon = float(s_dict.get("lon")) if s_dict.get("lon") else start.longitude
-                    e_lat = float(e_dict.get("lat")) if e_dict.get("lat") else end.latitude
-                    e_lon = float(e_dict.get("lon")) if e_dict.get("lon") else end.longitude
-                    path_coords.append(Coordinate(latitude=s_lat, longitude=s_lon))
-                    path_coords.append(Coordinate(latitude=e_lat, longitude=e_lon))
+                # 문제 해결의 핵심: Tmap의 도로망 좌표계 앞뒤로 '진짜 정류장/역 좌표'를 강제 삽입
+                exact_start = Coordinate(latitude=s_lat, longitude=s_lon)
+                exact_end = Coordinate(latitude=e_lat, longitude=e_lon)
+                
+                if path_coords:
+                    path_coords.insert(0, exact_start)
+                    path_coords.append(exact_end)
+                else:
+                    path_coords = [exact_start, exact_end]
 
                 segments.append(RouteSegment(
                     segmentType=mode,
@@ -150,7 +158,7 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                     realTimeArrivalInfo=None, 
                     pathCoordinates=path_coords
                 ))
-            
+                
             return RouteResponse(
                 totalTimeMin=total_time,
                 totalFareWon=total_fare,
