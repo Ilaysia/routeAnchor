@@ -10,27 +10,35 @@ for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'all_proxy
 KAKAO_REST_API_KEY = os.environ.get("KAKAO_REST_API_KEY")
 TMAP_API_KEY = os.environ.get("TMAP_API_KEY")
 
-def slice_path_to_pin(coords: list, target_lat: float, target_lon: float, is_start: bool) -> list:
+def trim_path(coords: list, s_lat: float, s_lon: float, e_lat: float, e_lon: float) -> list:
     if not coords: return coords
     
-    min_dist = float('inf')
-    closest_idx = 0
-    for idx, pt in enumerate(coords):
-        dist = (pt.latitude - target_lat)**2 + (pt.longitude - target_lon)**2
-        if dist < min_dist:
-            min_dist = dist
-            closest_idx = idx
+    s_idx = 0
+    min_s_dist = float('inf')
+    for i, pt in enumerate(coords):
+        dist = (pt.latitude - s_lat)**2 + (pt.longitude - s_lon)**2
+        if dist < min_s_dist:
+            min_s_dist = dist
+            s_idx = i
             
-    if is_start:
-        trimmed = coords[closest_idx:]
-        if trimmed:
-            trimmed[0] = Coordinate(latitude=target_lat, longitude=target_lon)
-        return trimmed
+    e_idx = len(coords) - 1
+    min_e_dist = float('inf')
+    for i, pt in enumerate(coords):
+        dist = (pt.latitude - e_lat)**2 + (pt.longitude - e_lon)**2
+        if dist < min_e_dist:
+            min_e_dist = dist
+            e_idx = i
+            
+    if s_idx <= e_idx:
+        trimmed = coords[s_idx:e_idx+1]
     else:
-        trimmed = coords[:closest_idx+1]
-        if trimmed:
-            trimmed[-1] = Coordinate(latitude=target_lat, longitude=target_lon)
-        return trimmed
+        trimmed = coords[e_idx:s_idx+1]
+        trimmed.reverse()
+        
+    if trimmed:
+        trimmed[0] = Coordinate(latitude=s_lat, longitude=s_lon)
+        trimmed[-1] = Coordinate(latitude=e_lat, longitude=e_lon)
+    return trimmed
 
 async def get_coords_from_kakao(place_name: str) -> tuple[float, float]:
     url = "https://dapi.kakao.com/v2/local/search/keyword.json"
@@ -157,6 +165,13 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                             path_coords.extend(parse_linestring(ls))
                             
                     instruction = f"도보 이동 ({distance}m)"
+                    
+                    if path_coords:
+                        if i == 0:
+                            path_coords[0] = Coordinate(latitude=start.latitude, longitude=start.longitude)
+                        if i == len(legs) - 1:
+                            path_coords[-1] = Coordinate(latitude=end.latitude, longitude=end.longitude)
+
                 else:
                     pass_shape = leg.get("passShape")
                     ls = ""
@@ -175,43 +190,16 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                     else:
                         instruction = f"[{route_name}] {start_name} -> {end_name}"
 
-                if path_coords:
-                    if mode in ["BUS", "SUBWAY"]:
-                        real_s_lat, real_s_lon = None, None
-                        real_e_lat, real_e_lon = None, None
-                        
-                        try:
-                            s_lon, s_lat = await get_coords_from_kakao(start_name)
-                            real_s_lat, real_s_lon = s_lat, s_lon
-                        except:
-                            station_list = leg.get("passStopList", {}).get("stationList", [])
-                            if station_list:
-                                real_s_lat = float(station_list[0].get("lat", 0))
-                                real_s_lon = float(station_list[0].get("lon", 0))
-                        
-                        try:
-                            e_lon, e_lat = await get_coords_from_kakao(end_name)
-                            real_e_lat, real_e_lon = e_lat, e_lon
-                        except:
-                            station_list = leg.get("passStopList", {}).get("stationList", [])
-                            if station_list:
-                                real_e_lat = float(station_list[-1].get("lat", 0))
-                                real_e_lon = float(station_list[-1].get("lon", 0))
-                                
-                        if real_s_lat and real_s_lon:
-                            path_coords = slice_path_to_pin(path_coords, real_s_lat, real_s_lon, True)
-                        if real_e_lat and real_e_lon:
-                            path_coords = slice_path_to_pin(path_coords, real_e_lat, real_e_lon, False)
-                    else:
-                        s_dict = leg.get("start") or {}
-                        e_dict = leg.get("end") or {}
-                        s_lat = s_dict.get("lat")
-                        s_lon = s_dict.get("lon")
-                        e_lat = e_dict.get("lat")
-                        e_lon = e_dict.get("lon")
-                        if s_lat and s_lon and e_lat and e_lon:
-                            path_coords[0] = Coordinate(latitude=float(s_lat), longitude=float(s_lon))
-                            path_coords[-1] = Coordinate(latitude=float(e_lat), longitude=float(e_lon))
+                    if path_coords:
+                        station_list = leg.get("passStopList", {}).get("stationList", [])
+                        if station_list:
+                            s_lat = float(station_list[0].get("lat", 0))
+                            s_lon = float(station_list[0].get("lon", 0))
+                            e_lat = float(station_list[-1].get("lat", 0))
+                            e_lon = float(station_list[-1].get("lon", 0))
+                            
+                            if s_lat != 0 and s_lon != 0 and e_lat != 0 and e_lon != 0:
+                                path_coords = trim_path(path_coords, s_lat, s_lon, e_lat, e_lon)
 
                 if not path_coords:
                     s_dict = leg.get("start") or {}
