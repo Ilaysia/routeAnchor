@@ -10,36 +10,6 @@ for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'all_proxy
 KAKAO_REST_API_KEY = os.environ.get("KAKAO_REST_API_KEY")
 TMAP_API_KEY = os.environ.get("TMAP_API_KEY")
 
-def trim_path(coords: list, s_lat: float, s_lon: float, e_lat: float, e_lon: float) -> list:
-    if not coords: return coords
-    
-    s_idx = 0
-    min_s_dist = float('inf')
-    for i, pt in enumerate(coords):
-        dist = (pt.latitude - s_lat)**2 + (pt.longitude - s_lon)**2
-        if dist < min_s_dist:
-            min_s_dist = dist
-            s_idx = i
-            
-    e_idx = len(coords) - 1
-    min_e_dist = float('inf')
-    for i, pt in enumerate(coords):
-        dist = (pt.latitude - e_lat)**2 + (pt.longitude - e_lon)**2
-        if dist < min_e_dist:
-            min_e_dist = dist
-            e_idx = i
-            
-    if s_idx <= e_idx:
-        trimmed = coords[s_idx:e_idx+1]
-    else:
-        trimmed = coords[e_idx:s_idx+1]
-        trimmed.reverse()
-        
-    if trimmed:
-        trimmed[0] = Coordinate(latitude=s_lat, longitude=s_lon)
-        trimmed[-1] = Coordinate(latitude=e_lat, longitude=e_lon)
-    return trimmed
-
 async def get_coords_from_kakao(place_name: str) -> tuple[float, float]:
     url = "https://dapi.kakao.com/v2/local/search/keyword.json"
     headers = {"Authorization": f"KakaoAK {KAKAO_REST_API_KEY}"}
@@ -130,48 +100,18 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                 if mode == "EXPRESSBUS":
                     mode = "BUS"
                 
-                prev_mode = legs[i-1].get("mode") if i > 0 else None
-                next_mode = legs[i+1].get("mode") if i < len(legs) - 1 else None
-                
-                is_adjacent_to_subway = (prev_mode == "SUBWAY" or next_mode == "SUBWAY")
                 distance = leg.get("distance", 0)
-                    
                 section_time = leg.get("sectionTime", 0) // 60
                 start_name = leg.get("start", {}).get("name", "출발")
                 end_name = leg.get("end", {}).get("name", "도착")
-
-                check_start_name = start.name if i == 0 else start_name
-                check_end_name = end.name if i == len(legs) - 1 else end_name
-                has_keyword = ("역" in check_start_name or "지하" in check_start_name or "역" in check_end_name or "지하" in check_end_name)
                 
                 path_coords = []
                 
                 if mode == "WALK":
-                    if is_adjacent_to_subway or has_keyword or distance < 50:
-                        s_dict = leg.get("start") or {}
-                        e_dict = leg.get("end") or {}
-                        start_lat = s_dict.get("lat")
-                        start_lon = s_dict.get("lon")
-                        end_lat = e_dict.get("lat")
-                        end_lon = e_dict.get("lon")
-                        
-                        if start_lat and start_lon:
-                            path_coords.append(Coordinate(latitude=float(start_lat), longitude=float(start_lon)))
-                        if end_lat and end_lon:
-                            path_coords.append(Coordinate(latitude=float(end_lat), longitude=float(end_lon)))
-                    else:
-                        for step in leg.get("steps", []):
-                            ls = step.get("linestring", "") or step.get("lineString", "")
-                            path_coords.extend(parse_linestring(ls))
-                            
+                    for step in leg.get("steps", []):
+                        ls = step.get("linestring", "") or step.get("lineString", "")
+                        path_coords.extend(parse_linestring(ls))
                     instruction = f"도보 이동 ({distance}m)"
-                    
-                    if path_coords:
-                        if i == 0:
-                            path_coords[0] = Coordinate(latitude=start.latitude, longitude=start.longitude)
-                        if i == len(legs) - 1:
-                            path_coords[-1] = Coordinate(latitude=end.latitude, longitude=end.longitude)
-
                 else:
                     pass_shape = leg.get("passShape")
                     ls = ""
@@ -189,17 +129,6 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                         instruction = f"[{route_name}] {start_name} 승차 -> {end_name} 하차"
                     else:
                         instruction = f"[{route_name}] {start_name} -> {end_name}"
-
-                    if path_coords:
-                        station_list = leg.get("passStopList", {}).get("stationList", [])
-                        if station_list:
-                            s_lat = float(station_list[0].get("lat", 0))
-                            s_lon = float(station_list[0].get("lon", 0))
-                            e_lat = float(station_list[-1].get("lat", 0))
-                            e_lon = float(station_list[-1].get("lon", 0))
-                            
-                            if s_lat != 0 and s_lon != 0 and e_lat != 0 and e_lon != 0:
-                                path_coords = trim_path(path_coords, s_lat, s_lon, e_lat, e_lon)
 
                 if not path_coords:
                     s_dict = leg.get("start") or {}
