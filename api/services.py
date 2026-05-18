@@ -205,22 +205,23 @@ async def process_optimized_route(request: RouteRequest) -> RouteResponse:
             ))
             total_time += 5
 
+    start_coord_to_use = Coordinate(latitude=all_points[0].latitude, longitude=all_points[0].longitude)
+    end_coord_to_use = Coordinate(latitude=all_points[-1].latitude, longitude=all_points[-1].longitude)
+
     if len(merged_segments) > 0:
         first_seg = merged_segments[0]
-        real_start_coord = Coordinate(latitude=all_points[0].latitude, longitude=all_points[0].longitude)
-        
-        if first_seg.pathCoordinates:
-            first_seg.pathCoordinates = [real_start_coord] + first_seg.pathCoordinates
-        else:
-            first_seg.pathCoordinates = [real_start_coord]
+        if first_seg.segmentType == "WALK":
+            first_seg.pathCoordinates = []
+            # 첫 구간이 도보라면 시작 마커 자체를 그다음 대중교통 정류장으로 옮겨버림
+            if len(merged_segments) > 1 and merged_segments[1].pathCoordinates:
+                start_coord_to_use = merged_segments[1].pathCoordinates[0]
 
         last_seg = merged_segments[-1]
-        real_end_coord = Coordinate(latitude=all_points[-1].latitude, longitude=all_points[-1].longitude)
-        
-        if last_seg.pathCoordinates:
-            last_seg.pathCoordinates = last_seg.pathCoordinates + [real_end_coord]
-        else:
-            last_seg.pathCoordinates = [real_end_coord]
+        if last_seg.segmentType == "WALK":
+            last_seg.pathCoordinates = []
+            # 마지막 구간이 도보라면 도착 마커 자체를 그 직전 대중교통 정류장으로 당겨버림
+            if len(merged_segments) > 1 and merged_segments[-2].pathCoordinates:
+                end_coord_to_use = merged_segments[-2].pathCoordinates[-1]
 
     anchor_coords = [Coordinate(latitude=p.latitude, longitude=p.longitude) for p in request.anchorPoints]
     
@@ -229,7 +230,7 @@ async def process_optimized_route(request: RouteRequest) -> RouteResponse:
         totalFareWon=total_fare,
         totalWalkDistanceMeter=total_walk,
         segments=merged_segments,
-        startCoordinate=Coordinate(latitude=all_points[0].latitude, longitude=all_points[0].longitude),
-        endCoordinate=Coordinate(latitude=all_points[-1].latitude, longitude=all_points[-1].longitude),
+        startCoordinate=start_coord_to_use,
+        endCoordinate=end_coord_to_use,
         anchorCoordinates=anchor_coords
     )
