@@ -207,20 +207,20 @@ async def process_optimized_route(request: RouteRequest) -> RouteResponse:
 
     if len(merged_segments) > 0:
         first_seg = merged_segments[0]
-        if first_seg.segmentType == "WALK":
-            real_start_coord = Coordinate(latitude=all_points[0].latitude, longitude=all_points[0].longitude)
-            if first_seg.pathCoordinates is not None:
-                first_seg.pathCoordinates.insert(0, real_start_coord)
-            else:
-                first_seg.pathCoordinates = [real_start_coord]
+        real_start_coord = Coordinate(latitude=all_points[0].latitude, longitude=all_points[0].longitude)
+        
+        if first_seg.pathCoordinates:
+            first_seg.pathCoordinates = [real_start_coord] + first_seg.pathCoordinates
+        else:
+            first_seg.pathCoordinates = [real_start_coord]
 
         last_seg = merged_segments[-1]
-        if last_seg.segmentType == "WALK":
-            real_end_coord = Coordinate(latitude=all_points[-1].latitude, longitude=all_points[-1].longitude)
-            if last_seg.pathCoordinates is not None:
-                last_seg.pathCoordinates.append(real_end_coord)
-            else:
-                last_seg.pathCoordinates = [real_end_coord]
+        real_end_coord = Coordinate(latitude=all_points[-1].latitude, longitude=all_points[-1].longitude)
+        
+        if last_seg.pathCoordinates:
+            last_seg.pathCoordinates = last_seg.pathCoordinates + [real_end_coord]
+        else:
+            last_seg.pathCoordinates = [real_end_coord]
 
     anchor_coords = [Coordinate(latitude=p.latitude, longitude=p.longitude) for p in request.anchorPoints]
     
