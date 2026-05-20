@@ -6,22 +6,32 @@ from api.schemas import RouteRequest, RouteResponse, RouteSegment, LocationPoint
 for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY']:
     os.environ.pop(key, None)
 
-KAKAO_REST_API_KEY = os.environ.get("KAKAO_REST_API_KEY")
+# 카카오는 이제 안 쓰므로 TMAP 키만 가져옵니다.
 TMAP_API_KEY = os.environ.get("TMAP_API_KEY")
 
-async def get_coords_from_kakao(place_name: str) -> tuple[float, float]:
-    url = "[https://dapi.kakao.com/v2/local/search/keyword.json](https://dapi.kakao.com/v2/local/search/keyword.json)"
-    headers = {"Authorization": f"KakaoAK {KAKAO_REST_API_KEY}"}
-    params = {"query": place_name}
+# [핵심 해결 로직] 카카오 지오코딩 대신 TMAP 지오코딩 API를 사용하여 좌표계를 100% TMAP으로 통일합니다.
+async def get_coords_from_tmap(place_name: str) -> tuple[float, float]:
+    url = "https://apis.openapi.sk.com/tmap/pois"
+    headers = {
+        "appKey": TMAP_API_KEY,
+        "accept": "application/json"
+    }
+    params = {
+        "version": "1",
+        "searchKeyword": place_name,
+        "count": 1
+    }
     
     async with httpx.AsyncClient(trust_env=False) as client:
         response = await client.get(url, headers=headers, params=params)
         if response.status_code == 200:
             data = response.json()
-            if data.get("documents"):
-                x = float(data["documents"][0]["x"])
-                y = float(data["documents"][0]["y"])
-                return x, y
+            if "searchPoiInfo" in data and "pois" in data["searchPoiInfo"]:
+                poi = data["searchPoiInfo"]["pois"]["poi"][0]
+                lat = float(poi["noorLat"])
+                lon = float(poi["noorLon"])
+                return lon, lat
+                
     raise HTTPException(status_code=400, detail=f"'{place_name}' 장소를 찾을 수 없습니다.")
 
 async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_type: str) -> RouteResponse:
@@ -35,7 +45,7 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
             )]
         )
 
-    url = "[https://apis.openapi.sk.com/transit/routes](https://apis.openapi.sk.com/transit/routes)"
+    url = "https://apis.openapi.sk.com/transit/routes"
     headers = {
         "appKey": TMAP_API_KEY,
         "accept": "application/json",
@@ -121,7 +131,8 @@ async def process_optimized_route(request: RouteRequest) -> RouteResponse:
     all_points = [request.startPoint] + request.anchorPoints + [request.endPoint]
     for point in all_points:
         if point.latitude == 0.0 and point.longitude == 0.0:
-            lon, lat = await get_coords_from_kakao(point.name)
+            # [핵심 수정] 여기서 카카오 대신 방금 만든 get_coords_from_tmap을 호출합니다.
+            lon, lat = await get_coords_from_tmap(point.name)
             point.longitude = lon
             point.latitude = lat
 
