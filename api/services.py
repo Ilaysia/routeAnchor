@@ -1,12 +1,14 @@
 import os
+
+for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY']:
+    os.environ.pop(key, None)
+
 import httpx
 from fastapi import HTTPException
 from api.schemas import RouteRequest, RouteResponse, RouteSegment, LocationPoint, Coordinate
 
-# 카카오는 이제 안 쓰므로 TMAP 키만 가져옵니다.
 TMAP_API_KEY = os.environ.get("TMAP_API_KEY")
 
-# [핵심 해결 로직] 카카오 지오코딩 대신 TMAP 지오코딩 API를 사용하여 좌표계를 100% TMAP으로 통일합니다.
 async def get_coords_from_tmap(place_name: str) -> tuple[float, float]:
     url = "https://apis.openapi.sk.com/tmap/pois"
     headers = {
@@ -20,8 +22,7 @@ async def get_coords_from_tmap(place_name: str) -> tuple[float, float]:
         "count": 1
     }
     
-    # 수정: proxies={} 추가로 Vercel 프록시 파싱 에러 원천 차단
-    async with httpx.AsyncClient(proxies={}, trust_env=False) as client:
+    async with httpx.AsyncClient(trust_env=False) as client:
         response = await client.get(url, headers=headers, params=params)
         if response.status_code == 200:
             data = response.json()
@@ -62,8 +63,7 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
         "format": "json"
     }
     
-    # 수정: proxies={} 추가로 Vercel 프록시 파싱 에러 원천 차단
-    async with httpx.AsyncClient(proxies={}, trust_env=False) as client:
+    async with httpx.AsyncClient(trust_env=False) as client:
         response = await client.post(url, headers=headers, json=payload)
         if response.status_code != 200:
             raise HTTPException(status_code=500, detail="TMAP 연동 실패")
