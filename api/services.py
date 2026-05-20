@@ -8,6 +8,7 @@ for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'all_proxy
 
 # 카카오는 이제 안 쓰므로 TMAP 키만 가져옵니다.
 TMAP_API_KEY = os.environ.get("TMAP_API_KEY")
+KAKAO_REST_API_KEY = os.environ.get("KAKAO_REST_API_KEY")
 
 # [핵심 해결 로직] 카카오 지오코딩 대신 TMAP 지오코딩 API를 사용하여 좌표계를 100% TMAP으로 통일합니다.
 async def get_coords_from_tmap(place_name: str) -> tuple[float, float]:
