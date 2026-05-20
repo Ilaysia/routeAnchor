@@ -108,11 +108,6 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
                     for step in leg.get("steps", []):
                         ls = step.get("linestring", "") or step.get("lineString", "")
                         path_coords.extend(parse_linestring(ls))
-                if mode == "BUS":
-                    accurate_start = await get_accurate_stop_coords(start_name)
-                    if accurate_start:
-                        path_coords[0] = accurate_start # 경로의 첫 좌표를 카카오 정류장 좌표로 교체
-                        
                 else:
                     pass_shape = leg.get("passShape")
                     ls = pass_shape if isinstance(pass_shape, str) else (pass_shape.get("linestring", "") if pass_shape else "")
@@ -131,21 +126,6 @@ async def fetch_segment_from_tmap(start: LocationPoint, end: LocationPoint, opt_
             return RouteResponse(totalTimeMin=total_time, totalFareWon=total_fare, totalWalkDistanceMeter=total_walk, segments=segments)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"파싱 실패: {e}")
-        
-async def get_accurate_stop_coords(stop_name: str) -> Coordinate:
-    url = "https://dapi.kakao.com/v2/local/search/keyword.json"
-    headers = {"Authorization": f"KakaoAK {KAKAO_REST_API_KEY}"}
-    params = {"query": f"{stop_name} 버스정류장"} # 검색어에 '버스정류장'을 붙여 정확도 향상
-    
-    async with httpx.AsyncClient(trust_env=False) as client:
-        response = await client.get(url, headers=headers, params=params)
-        if response.status_code == 200:
-            data = response.json()
-            if data.get("documents"):
-                # 카카오가 제공하는 가장 정확한 정류장 좌표 반환
-                return Coordinate(latitude=float(data["documents"][0]["y"]), 
-                                 longitude=float(data["documents"][0]["x"]))
-    return None # 못 찾으면 TMAP 좌표 그대로 사용
 
 async def process_optimized_route(request: RouteRequest) -> RouteResponse:
     all_points = [request.startPoint] + request.anchorPoints + [request.endPoint]
