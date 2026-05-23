@@ -5,8 +5,6 @@ import itertools
 import urllib.parse
 import re
 import asyncio  
-import json  
-import yarl  
 from fastapi import HTTPException
 from api.schemas import RouteRequest, RouteResponse, RouteSegment, LocationPoint, Coordinate, TransitOption
 
@@ -62,28 +60,41 @@ async def fetch_seoul_subway_arrivals(station_name: str, target_line: str) -> li
     return []
 
 # =====================================================================
-# [Step 1] 주변 정류장 3개 정보 가져오기 (HTTPS 보안 통일)
+# [Step 1] 주변 정류장 3개 정보 가져오기 (표준 params 구조로 원복)
 # =====================================================================
 async def get_tago_nodes(lat: float, lon: float, session: aiohttp.ClientSession) -> list[tuple[str, str]]:
     if not TAGO_API_KEY: 
         print("🚨 [TAGO 에러] TAGO_API_KEY 환경변수가 설정되지 않았습니다.")
         return []
     
-    clean_key = TAGO_API_KEY.strip()
-    # 🌟 정부 보안 서버 규격에 맞춰 전 구간 주소를 https:// 로 통일하여 차단을 우회합니다.
-    url = f"https://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList?serviceKey={clean_key}&gpsLati={lat}&gpsLong={lon}&_type=json&numOfRows=3&pageNo=1"
+    # 🌟 수동 스트링 조립을 버리고 가이드라인에 명시된 순수 http 주소 규격을 적용합니다.
+    url = "http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList"
+    
+    # 🌟 16진수 키이므로 변조 없이 담백하게 params 딕셔너리로 넘겨야 방화벽이 차단하지 않습니다.
+    params = {
+        "serviceKey": TAGO_API_KEY.strip(),
+        "gpsLati": str(lat),
+        "gpsLong": str(lon),
+        "_type": "json",
+        "numOfRows": "3",
+        "pageNo": "1"
+    }
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
     try:
-        async with session.get(yarl.URL(url, encoded=True), headers=headers, timeout=3.0) as response:
-            text = await response.text()
+        async with session.get(url, params=params, headers=headers, timeout=3.0) as response:
+            if response.status != 200:
+                print(f"🚨 [TAGO 정류장 에러] HTTP 상태 코드: {response.status}")
+                return []
+                
             try:
-                data = json.loads(text)
-            except json.JSONDecodeError:
-                print(f"🚨 [TAGO 정류장 파싱 실패] 정부 서버 응답 본문:\n{text}")
+                data = await response.json()
+            except Exception:
+                text = await response.text()
+                print(f"🚨 [TAGO 정류장 파싱 에러] 응답이 JSON이 아닙니다 본문:\n{text}")
                 return []
             
             items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
@@ -103,27 +114,42 @@ async def get_tago_nodes(lat: float, lon: float, session: aiohttp.ClientSession)
     return []
 
 # =====================================================================
-# [Step 2] 버스 도착 정보 가져오기 (HTTPS 보안 통일)
+# [Step 2] 버스 도착 정보 가져오기 (표준 params 구조로 원복)
 # =====================================================================
 async def fetch_tago_bus_arrivals(node_id: str, city_code: str, session: aiohttp.ClientSession) -> dict:
     if not TAGO_API_KEY: return {}
     
-    clean_key = TAGO_API_KEY.strip()
-    url = f"https://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList?serviceKey={clean_key}&cityCode={city_code}&nodeId={node_id}&_type=json&numOfRows=30&pageNo=1"
+    # 🌟 활용 가이드에 명시된 순수 http 대중교통 도착 서비스 주소 규격 적용
+    url = "http://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList"
+    
+    params = {
+        "serviceKey": TAGO_API_KEY.strip(),
+        "cityCode": str(city_code),
+        "nodeId": str(node_id),
+        "_type": "json",
+        "numOfRows": "30",
+        "pageNo": "1"
+    }
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
     try:
-        async with session.get(yarl.URL(url, encoded=True), headers=headers, timeout=3.0) as response: 
-            text = await response.text()
+        async with session.get(url, params=params, headers=headers, timeout=3.0) as response: 
+            if response.status != 200:
+                return {}
+                
             try:
-                data = json.loads(text)
-            except json.JSONDecodeError:
+                data = await response.json()
+            except Exception:
                 return {}
             
-            items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
+            body = data.get("response", {}).get("body", {})
+            if not body or "items" not in body or not body["items"]:
+                return {}
+            
+            items = body.get("items", {}).get("item", [])
             if isinstance(items, dict): items = [items]
             
             bus_info = {}
@@ -145,7 +171,7 @@ async def fetch_tago_bus_arrivals(node_id: str, city_code: str, session: aiohttp
     return {}
 
 # =====================================================================
-# [Step 3] 3개 정류장의 데이터를 하나로 통합 캐싱 (기존 병렬 처리 유지)
+# [Step 3] 3개 정류장의 데이터를 하나로 통합 캐싱 (병렬 처리)
 # =====================================================================
 async def fetch_and_cache(lat_str: str, lon_str: str, session: aiohttp.ClientSession):
     nodes = await get_tago_nodes(float(lat_str), float(lon_str), session)
