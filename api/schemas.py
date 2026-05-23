@@ -25,7 +25,6 @@ class RouteSegment(BaseModel):
     startLocationName: str
     endLocationName: str
     
-    # 지도를 띄우고 실시간 정보를 받기 위해 새롭게 추가된 부분
     pathCoordinates: Optional[List[Coordinate]] = None
     stationId: Optional[str] = None
     realTimeArrivalInfo: Optional[str] = None
@@ -44,3 +43,6 @@ class RouteResponse(BaseModel):
     startCoordinate: Optional[Coordinate] = None
     endCoordinate: Optional[Coordinate] = None
     anchorCoordinates: List[Coordinate] = []
+
+class RouteListResponse(BaseModel):
+    routes: List[RouteResponse]
