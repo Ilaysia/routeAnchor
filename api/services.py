@@ -223,8 +223,12 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                     
                     for leg in path.get("legs", []):
                         mode = leg.get("mode", "WALK")
-                        if mode in ["EXPRESSBUS", "INTERCITYBUS"]: mode = "BUS"
-                        elif mode == "TRAIN": mode = "SUBWAY"
+                        
+                        # 🌟 1. 핵심: LOCALBUS, TOWNBUS 등 이름에 BUS가 들어가면 무조건 "BUS"로 묶기
+                        if "BUS" in mode: 
+                            mode = "BUS"
+                        elif mode == "TRAIN": 
+                            mode = "SUBWAY"
                             
                         section_time = leg.get("sectionTime", 0) // 60
                         start_name = leg.get("start", {}).get("name", "출발")
@@ -235,6 +239,7 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                         
                         if mode == "WALK":
                             instruction = "도보 이동"
+                            # ... [기존 linestring 파싱 로직 유지] ...
                             for step in leg.get("steps", []):
                                 ls = step.get("linestring", "") or step.get("lineString", "")
                                 path_coords.extend(parse_linestring(ls))
@@ -251,15 +256,22 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                                     station_id = pass_stops[0].get("stationID", "")
                                     s_lat, s_lon = pass_stops[0].get("lat", s_lat), pass_stops[0].get("lon", s_lon)
                             
-                            # 버스 정보 바인딩
-                            if mode == "BUS" and station_id and s_lat and s_lon:
-                                if station_id not in tago_cache:
-                                    city_code = await get_tago_city_code(float(s_lat), float(s_lon))
-                                    tago_cache[station_id] = await fetch_tago_bus_arrivals(station_id, city_code)
-                                real_time_data = tago_cache[station_id]
+                            # 🌟 2. 수정됨: 좌표를 활용한 무적 버스 정보 매칭
+                            if mode == "BUS" and s_lat and s_lon:
+                                cache_key = f"{s_lat}_{s_lon}"
+                                if cache_key not in tago_cache:
+                                    # TMAP 정류장 번호를 버리고, 위경도로 공공데이터 서버의 진짜 ID를 찾아냅니다.
+                                    city_code, tago_node_id = await get_tago_node_info(float(s_lat), float(s_lon))
+                                    if tago_node_id:
+                                        tago_cache[cache_key] = await fetch_tago_bus_arrivals(tago_node_id, city_code)
+                                    else:
+                                        tago_cache[cache_key] = {}
+                                        
+                                real_time_data = tago_cache[cache_key]
                                 
                                 for r_name in route_names:
                                     times = []
+                                    # "143" vs "간선 143" 유연하게 텍스트 포함 여부로 매칭
                                     for tago_bus_no, tago_times in real_time_data.items():
                                         if str(tago_bus_no) in r_name or r_name in str(tago_bus_no):
                                             times = tago_times
@@ -269,7 +281,7 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                                     arr2 = times[1] if len(times) > 1 else None
                                     transit_options.append(TransitOption(routeName=r_name, arrivalTime1=arr1, arrivalTime2=arr2))
                             
-                            # 지하철 정보 바인딩
+                            # 지하철인 경우 (기존 코드 유지)
                             elif mode == "SUBWAY":
                                 for r_name in route_names:
                                     times = await fetch_seoul_subway_arrivals(start_name, r_name)
