@@ -5,12 +5,13 @@ import itertools
 import urllib.parse
 import re
 import asyncio  
-import json  # 🌟 안전한 JSON 파싱을 위해 추가
+import json  
+import yarl  # 🌟 [중요] 이중 인코딩을 물리적으로 차단하기 위한 라이브러리 추가
 from fastapi import HTTPException
 from api.schemas import RouteRequest, RouteResponse, RouteSegment, LocationPoint, Coordinate, TransitOption
 
 # 프록시 환경변수 제거
-for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY']:
+for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'ALL_PROXY', 'all_proxy', 'HTTPS_PROXY']:
     os.environ.pop(key, None)
 
 TMAP_API_KEY = os.environ.get("TMAP_API_KEY")
@@ -58,26 +59,27 @@ async def fetch_seoul_subway_arrivals(station_name: str, target_line: str) -> li
     return []
 
 # =====================================================================
-# [Step 1] 주변 정류장 3개 모두 가져오기 (인코딩 우회 및 에러 추적 강화)
+# [Step 1] 주변 정류장 3개 모두 가져오기 (yarl 제어 적용)
 # =====================================================================
 async def get_tago_nodes(lat: float, lon: float, session: aiohttp.ClientSession) -> list[tuple[str, str]]:
     if not TAGO_API_KEY: 
         print("🚨 [TAGO 에러] TAGO_API_KEY 환경변수가 설정되지 않았습니다.")
         return []
     
-    # 🌟 중요: 라이브러리의 자동 인코딩을 우회하기 위해 URL 스트링에 Key를 직접 주입합니다.
     url = f"http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList?serviceKey={TAGO_API_KEY}&gpsLati={lat}&gpsLong={lon}&_type=json&numOfRows=3&pageNo=1"
     
     try:
-        async with session.get(url, timeout=3.0) as response:
+        # 🌟 yarl.URL(..., encoded=True)를 감싸서 % 기호가 %25로 변조되는 것을 완벽히 방어합니다.
+        async with session.get(yarl.URL(url, encoded=True), timeout=3.0) as response:
             text = await response.text()
             
-            # 공공데이터포털 고질적 에러 검사
-            if "SERVICE_KEY_IS_NOT_REGISTERED" in text:
-                print("🚨 [TAGO 에러] 버스 API 키가 잘못되었거나 미승인 상태입니다. (SERVICE_KEY_IS_NOT_REGISTERED_ERROR)")
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                # 🌟 만약 또 에러가 나면, 정부 서버가 보낸 날것의 에러 응답(XML 등)을 로그에 그대로 찍어 원인을 파악합니다.
+                print(f"🚨 [TAGO 정류장 파싱 실패] JSON이 아닙니다. 정부 서버 응답 본문:\n{text}")
                 return []
             
-            data = json.loads(text)
             items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
             if isinstance(items, dict): items = [items]
             
@@ -89,27 +91,30 @@ async def get_tago_nodes(lat: float, lon: float, session: aiohttp.ClientSession)
                     nodes.append((city, node))
             return nodes
     except asyncio.TimeoutError:
-        print(f"⏳ [TAGO 정류장] 3.0초 시간 초과로 패스함 (좌표: {lat}, {lon})")
+        print(f"⏳ [TAGO 정류장] 3.0초 시간 초과 (좌표: {lat}, {lon})")
     except Exception as e:
-        print(f"🚨 [TAGO 정류장 파싱 에러]: {str(e)}")
+        print(f"🚨 [TAGO 정류장 시스템 에러]: {str(e)}")
     return []
 
 # =====================================================================
-# [Step 2] 특정 정류장의 버스 도착 정보 가져오기 (인코딩 우회 및 에러 추적 강화)
+# [Step 2] 특정 정류장의 버스 도착 정보 가져오기 (yarl 제어 적용)
 # =====================================================================
 async def fetch_tago_bus_arrivals(node_id: str, city_code: str, session: aiohttp.ClientSession) -> dict:
     if not TAGO_API_KEY: return {}
     
-    # 🌟 여기도 URL 스트링에 Key를 직접 주입하여 이중 인코딩 방지
     url = f"http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getSttnAcctoArvlPrearngeInfoList?serviceKey={TAGO_API_KEY}&cityCode={city_code}&nodeId={node_id}&_type=json&numOfRows=30&pageNo=1"
     
     try:
-        async with session.get(url, timeout=3.0) as response: 
+        # 🌟 여기도 동일하게 자동 인코딩을 물리적으로 차단합니다.
+        async with session.get(yarl.URL(url, encoded=True), timeout=3.0) as response: 
             text = await response.text()
-            if "SERVICE_KEY_IS_NOT_REGISTERED" in text:
+            
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                print(f"🚨 [TAGO 버스도착 파싱 실패] JSON이 아닙니다. 정부 서버 응답 본문:\n{text}")
                 return {}
             
-            data = json.loads(text)
             items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
             if isinstance(items, dict): items = [items]
             
@@ -126,9 +131,9 @@ async def fetch_tago_bus_arrivals(node_id: str, city_code: str, session: aiohttp
                 result[bus] = [f"{t}분" if t > 0 else "곧 도착" for t in times][:2]
             return result
     except asyncio.TimeoutError:
-        print(f"⏳ [TAGO 버스도착] 3.0초 시간 초과로 패스함 (NodeID: {node_id})")
+        print(f"⏳ [TAGO 버스도착] 3.0초 시간 초과 (NodeID: {node_id})")
     except Exception as e:
-        print(f"🚨 [TAGO 버스도착 파싱 에러]: {str(e)}")
+        print(f"🚨 [TAGO 버스도착 시스템 에러]: {str(e)}")
     return {}
 
 # =====================================================================
