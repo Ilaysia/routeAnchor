@@ -6,7 +6,7 @@ import urllib.parse
 import re
 import asyncio  
 import json  
-import yarl  # 이중 인코딩 및 방화벽 차단을 막기 위한 라이브러리
+import yarl  # 이중 인코딩 및 WAF 방화벽 차단을 막기 위한 라이브러리
 from fastapi import HTTPException
 from api.schemas import RouteRequest, RouteResponse, RouteSegment, LocationPoint, Coordinate, TransitOption
 
@@ -24,7 +24,6 @@ SEOUL_SUBWAY_API_KEY = os.environ.get("SEOUL_SUBWAY_API_KEY")
 async def fetch_seoul_subway_arrivals(station_name: str, target_line: str) -> list:
     if not SEOUL_SUBWAY_API_KEY: return []
     
-    # 공백 정제
     subway_key = SEOUL_SUBWAY_API_KEY.strip()
     clean_name = re.split(r'역|\(|\.|·', station_name)[0].strip()
     encoded_name = urllib.parse.quote(clean_name)
@@ -63,20 +62,17 @@ async def fetch_seoul_subway_arrivals(station_name: str, target_line: str) -> li
     return []
 
 # =====================================================================
-# [Step 1] 주변 정류장 3개 모두 가져오기 (인증키 변조 차단 + 브라우저 위장)
+# [Step 1] 주변 정류장 3개 정보 가져오기 (BusSttnInfoInqireService)
 # =====================================================================
 async def get_tago_nodes(lat: float, lon: float, session: aiohttp.ClientSession) -> list[tuple[str, str]]:
     if not TAGO_API_KEY: 
         print("🚨 [TAGO 에러] TAGO_API_KEY 환경변수가 설정되지 않았습니다.")
         return []
     
-    # 🌟 [해결 핵심] 앞뒤 공백 제거 및 디코딩 키 우회 인코딩 처리
     clean_key = TAGO_API_KEY.strip()
-    encoded_key = urllib.parse.quote(clean_key) if '%' not in clean_key else clean_key
+    # 정류소 목록 조회는 가이드에 따라 BusSttnInfoInqireService 주소를 사용합니다.
+    url = f"http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList?serviceKey={clean_key}&gpsLati={lat}&gpsLong={lon}&_type=json&numOfRows=3&pageNo=1"
     
-    url = f"http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList?serviceKey={encoded_key}&gpsLati={lat}&gpsLong={lon}&_type=json&numOfRows=3&pageNo=1"
-    
-    # 🌟 [해결 핵심] 403 Forbidden을 우회하기 위한 브라우저 헤더 추가
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
@@ -84,11 +80,10 @@ async def get_tago_nodes(lat: float, lon: float, session: aiohttp.ClientSession)
     try:
         async with session.get(yarl.URL(url, encoded=True), headers=headers, timeout=3.0) as response:
             text = await response.text()
-            
             try:
                 data = json.loads(text)
             except json.JSONDecodeError:
-                print(f"🚨 [TAGO 정류장 파싱 실패] JSON이 아닙니다. 정부 서버 응답 본문:\n{text}")
+                print(f"🚨 [TAGO 정류장 파실 실패] 정부 서버 응답 본문:\n{text}")
                 return []
             
             items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
@@ -108,16 +103,14 @@ async def get_tago_nodes(lat: float, lon: float, session: aiohttp.ClientSession)
     return []
 
 # =====================================================================
-# [Step 2] 특정 정류장의 버스 도착 정보 가져오기 (인증키 변조 차단 + 브라우저 위장)
+# [Step 2] 🌟 완벽 교정: 버스 도착 정보 가져오기 (ArvlInfoInqireService)
 # =====================================================================
 async def fetch_tago_bus_arrivals(node_id: str, city_code: str, session: aiohttp.ClientSession) -> dict:
     if not TAGO_API_KEY: return {}
     
-    # 🌟 앞뒤 공백 제거 및 디코딩 키 우회 인코딩 처리
     clean_key = TAGO_API_KEY.strip()
-    encoded_key = urllib.parse.quote(clean_key) if '%' not in clean_key else clean_key
-    
-    url = f"http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getSttnAcctoArvlPrearngeInfoList?serviceKey={encoded_key}&cityCode={city_code}&nodeId={node_id}&_type=json&numOfRows=30&pageNo=1"
+    # 🌟 핵심 수정: 제공해주신 가이드에 맞춰 엔드포인트를 ArvlInfoInqireService로 변경했습니다!
+    url = f"https://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList?serviceKey={clean_key}&cityCode={city_code}&nodeId={node_id}&_type=json&numOfRows=30&pageNo=1"
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -126,11 +119,10 @@ async def fetch_tago_bus_arrivals(node_id: str, city_code: str, session: aiohttp
     try:
         async with session.get(yarl.URL(url, encoded=True), headers=headers, timeout=3.0) as response: 
             text = await response.text()
-            
             try:
                 data = json.loads(text)
             except json.JSONDecodeError:
-                print(f"🚨 [TAGO 버스도착 파싱 실패] JSON이 아닙니다. 정부 서버 응답 본문:\n{text}")
+                print(f"🚨 [TAGO 버스도착 파싱 실패] 정부 서버 응답 본문:\n{text}")
                 return {}
             
             items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
