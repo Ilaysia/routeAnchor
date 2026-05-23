@@ -6,7 +6,7 @@ import urllib.parse
 import re
 import asyncio  
 import json  
-import yarl  # 이중 인코딩 및 WAF 방화벽 차단을 막기 위한 라이브러리
+import yarl  
 from fastapi import HTTPException
 from api.schemas import RouteRequest, RouteResponse, RouteSegment, LocationPoint, Coordinate, TransitOption
 
@@ -62,7 +62,7 @@ async def fetch_seoul_subway_arrivals(station_name: str, target_line: str) -> li
     return []
 
 # =====================================================================
-# [Step 1] 주변 정류장 3개 정보 가져오기 (BusSttnInfoInqireService)
+# [Step 1] 주변 정류장 3개 정보 가져오기 (HTTPS 보안 통일)
 # =====================================================================
 async def get_tago_nodes(lat: float, lon: float, session: aiohttp.ClientSession) -> list[tuple[str, str]]:
     if not TAGO_API_KEY: 
@@ -70,8 +70,8 @@ async def get_tago_nodes(lat: float, lon: float, session: aiohttp.ClientSession)
         return []
     
     clean_key = TAGO_API_KEY.strip()
-    # 정류소 목록 조회는 가이드에 따라 BusSttnInfoInqireService 주소를 사용합니다.
-    url = f"http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList?serviceKey={clean_key}&gpsLati={lat}&gpsLong={lon}&_type=json&numOfRows=3&pageNo=1"
+    # 🌟 정부 보안 서버 규격에 맞춰 전 구간 주소를 https:// 로 통일하여 차단을 우회합니다.
+    url = f"https://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList?serviceKey={clean_key}&gpsLati={lat}&gpsLong={lon}&_type=json&numOfRows=3&pageNo=1"
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -83,7 +83,7 @@ async def get_tago_nodes(lat: float, lon: float, session: aiohttp.ClientSession)
             try:
                 data = json.loads(text)
             except json.JSONDecodeError:
-                print(f"🚨 [TAGO 정류장 파실 실패] 정부 서버 응답 본문:\n{text}")
+                print(f"🚨 [TAGO 정류장 파싱 실패] 정부 서버 응답 본문:\n{text}")
                 return []
             
             items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
@@ -103,13 +103,12 @@ async def get_tago_nodes(lat: float, lon: float, session: aiohttp.ClientSession)
     return []
 
 # =====================================================================
-# [Step 2] 🌟 완벽 교정: 버스 도착 정보 가져오기 (ArvlInfoInqireService)
+# [Step 2] 버스 도착 정보 가져오기 (HTTPS 보안 통일)
 # =====================================================================
 async def fetch_tago_bus_arrivals(node_id: str, city_code: str, session: aiohttp.ClientSession) -> dict:
     if not TAGO_API_KEY: return {}
     
     clean_key = TAGO_API_KEY.strip()
-    # 🌟 핵심 수정: 제공해주신 가이드에 맞춰 엔드포인트를 ArvlInfoInqireService로 변경했습니다!
     url = f"https://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList?serviceKey={clean_key}&cityCode={city_code}&nodeId={node_id}&_type=json&numOfRows=30&pageNo=1"
     
     headers = {
@@ -122,7 +121,6 @@ async def fetch_tago_bus_arrivals(node_id: str, city_code: str, session: aiohttp
             try:
                 data = json.loads(text)
             except json.JSONDecodeError:
-                print(f"🚨 [TAGO 버스도착 파싱 실패] 정부 서버 응답 본문:\n{text}")
                 return {}
             
             items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
@@ -147,7 +145,7 @@ async def fetch_tago_bus_arrivals(node_id: str, city_code: str, session: aiohttp
     return {}
 
 # =====================================================================
-# [Step 3] 3개 정류장의 데이터를 하나로 통합 캐싱 (병렬 처리)
+# [Step 3] 3개 정류장의 데이터를 하나로 통합 캐싱 (기존 병렬 처리 유지)
 # =====================================================================
 async def fetch_and_cache(lat_str: str, lon_str: str, session: aiohttp.ClientSession):
     nodes = await get_tago_nodes(float(lat_str), float(lon_str), session)
@@ -172,7 +170,7 @@ async def fetch_and_cache(lat_str: str, lon_str: str, session: aiohttp.ClientSes
     return f"{lat_str}_{lon_str}", merged_bus_info
 
 # =====================================================================
-# TMAP 지오코딩 및 길찾기 핵심 로직
+# TMAP 지오코딩 및 길찾기 핵심 로직 (기존 유지)
 # =====================================================================
 async def get_coords_from_tmap(place_name: str) -> tuple[float, float]:
     url = "https://apis.openapi.sk.com/tmap/pois"
