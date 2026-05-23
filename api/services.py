@@ -89,10 +89,7 @@ async def get_tago_city_code(lat: float, lon: float) -> str:
     return "31190"
 
 # =====================================================================
-# [Step 2] TAGO 버스 실시간 도착 정보 조회
-# =====================================================================
-# =====================================================================
-# [Step 1] 🌟 수정됨: TMAP 좌표를 이용해 공공데이터(TAGO) 공식 정류장 ID 찾기
+# [Step 1] TMAP 좌표를 이용해 공공데이터(TAGO) 공식 정류장 ID 찾기
 # =====================================================================
 async def get_tago_node_info(lat: float, lon: float) -> tuple[str, str]:
     if not TAGO_API_KEY: return "31190", ""
@@ -103,12 +100,13 @@ async def get_tago_node_info(lat: float, lon: float) -> tuple[str, str]:
         "gpsLati": str(lat),
         "gpsLong": str(lon),
         "_type": "json",
-        "numOfRows": "1", # 가장 가까운 정류장 1개만 조회
+        "numOfRows": "1", 
         "pageNo": "1"
     }
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, timeout=2.0) as response:
+            # 🌟 [수정 핵심] timeout=2.0을 timeout=5.0으로 변경!
+            async with session.get(url, params=params, timeout=5.0) as response:
                 if response.status == 200:
                     data = await response.json()
                     items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
@@ -118,9 +116,8 @@ async def get_tago_node_info(lat: float, lon: float) -> tuple[str, str]:
     except Exception as e: 
         print(f"TAGO 정류장 매칭 에러: {traceback.format_exc()}")
     return "31190", ""
-
 # =====================================================================
-# [Step 2] 🌟 수정됨: 공식 Node ID로 버스 실시간 도착 정보 조회
+# [Step 2] 공식 Node ID로 버스 실시간 도착 정보 조회
 # =====================================================================
 async def fetch_tago_bus_arrivals(node_id: str, city_code: str) -> dict:
     if not TAGO_API_KEY or not node_id: return {}
@@ -138,7 +135,8 @@ async def fetch_tago_bus_arrivals(node_id: str, city_code: str) -> dict:
     }
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, timeout=3.0) as response: 
+            # 🌟 [수정 핵심] 여기도 timeout=3.0을 timeout=5.0으로 변경!
+            async with session.get(url, params=params, timeout=5.0) as response: 
                 if response.status == 200:
                     data = await response.json()
                     body = data.get("response", {}).get("body", {})
