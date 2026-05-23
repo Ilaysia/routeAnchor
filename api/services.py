@@ -2,12 +2,13 @@ import os
 import aiohttp
 import traceback
 import itertools
-import urllib.parse  
-import re            
+import urllib.parse
+import re
+import asyncio  # 🌟 [필수] 타임아웃 에러를 방어하기 위한 모듈
 from fastapi import HTTPException
 from api.schemas import RouteRequest, RouteResponse, RouteSegment, LocationPoint, Coordinate, TransitOption
 
-# 프록시 환경변수 제거 (기존 유지)
+# 프록시 환경변수 제거
 for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY']:
     os.environ.pop(key, None)
 
@@ -16,11 +17,9 @@ TAGO_API_KEY = os.environ.get("TAGO_API_KEY")
 SEOUL_SUBWAY_API_KEY = os.environ.get("SEOUL_SUBWAY_API_KEY")
 
 # =====================================================================
-# 🌟 [수정] 서울/수도권 지하철 실시간 도착 정보 조회 (NoneType 방어 및 호선 매칭 강화)
+# 서울/수도권 지하철 실시간 도착 정보 조회
 # =====================================================================
 async def fetch_seoul_subway_arrivals(station_name: str, target_line: str) -> list:
-
-    # 마침표(.)나 가운뎃점(·)이 포함된 부역명까지 깔끔하게 잘라냅니다.
     clean_name = re.split(r'역|\(|\.|·', station_name)[0].strip()
     encoded_name = urllib.parse.quote(clean_name)
     
@@ -34,22 +33,18 @@ async def fetch_seoul_subway_arrivals(station_name: str, target_line: str) -> li
                     times = []
                     
                     for item in data.get("realtimeArrivalList", []):
-                        # 1. API가 subwayNm을 null(None)로 주는 경우를 완벽 방어
                         raw_subway_nm = item.get("subwayNm")
                         subway_line_name = str(raw_subway_nm).replace(" ", "") if raw_subway_nm else ""
                         clean_target_line = target_line.replace(" ", "")
                         
-                        # 2. 호선 매칭 로직 (수인분당선 등 예외 처리 및 None 값 수용)
                         is_match = False
                         if not subway_line_name: 
-                            # API가 호선명을 아예 안 줬다면, 검색된 역의 결과를 일단 수용함
                             is_match = True
                         elif subway_line_name in clean_target_line or clean_target_line in subway_line_name:
                             is_match = True
                         elif "분당" in clean_target_line and "분당" in subway_line_name:
                             is_match = True
                             
-                        # 3. 매칭된 경우 진짜 실시간 정보를 times 배열에 담음
                         if is_match:
                             msg = item.get("arvlMsg2")
                             if msg:
@@ -60,33 +55,6 @@ async def fetch_seoul_subway_arrivals(station_name: str, target_line: str) -> li
         print(f"지하철 실시간 에러 상세: {traceback.format_exc()}")
         
     return []
-# =====================================================================
-# [Step 1] TAGO 버스 지역코드 동적 획득
-# =====================================================================
-async def get_tago_city_code(lat: float, lon: float) -> str:
-    if not TAGO_API_KEY: return "31190"
-    
-    url = "http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList"
-    # 🌟 인코딩 에러 방지를 위해 params 방식으로 분리 전송
-    params = {
-        "serviceKey": urllib.parse.unquote(TAGO_API_KEY),
-        "gpsLati": str(lat),
-        "gpsLong": str(lon),
-        "_type": "json",
-        "numOfRows": "1",
-        "pageNo": "1"
-    }
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, timeout=2.0) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
-                    if isinstance(items, dict): items = [items]
-                    if items: return str(items[0].get("citycode", "31190"))
-    except Exception as e: 
-        print(f"City Code 에러: {traceback.format_exc()}")
-    return "31190"
 
 # =====================================================================
 # [Step 1] TMAP 좌표를 이용해 공공데이터(TAGO) 공식 정류장 ID 찾기
@@ -105,17 +73,20 @@ async def get_tago_node_info(lat: float, lon: float) -> tuple[str, str]:
     }
     try:
         async with aiohttp.ClientSession() as session:
-            # 🌟 [수정 핵심] timeout=2.0을 timeout=5.0으로 변경!
-            async with session.get(url, params=params, timeout=5.0) as response:
+            # 🌟 Vercel 앱 멈춤 방지를 위해 1.5초 타임아웃 설정
+            async with session.get(url, params=params, timeout=1.5) as response:
                 if response.status == 200:
                     data = await response.json()
                     items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
                     if isinstance(items, dict): items = [items]
                     if items:
                         return str(items[0].get("citycode", "31190")), str(items[0].get("nodeid", ""))
+    except asyncio.TimeoutError:
+        print("⏳ [TAGO 정류장] 1.5초 초과 (응답 지연) - 앱 멈춤 방지를 위해 패스합니다.")
     except Exception as e: 
         print(f"TAGO 정류장 매칭 에러: {traceback.format_exc()}")
     return "31190", ""
+
 # =====================================================================
 # [Step 2] 공식 Node ID로 버스 실시간 도착 정보 조회
 # =====================================================================
@@ -135,8 +106,8 @@ async def fetch_tago_bus_arrivals(node_id: str, city_code: str) -> dict:
     }
     try:
         async with aiohttp.ClientSession() as session:
-            # 🌟 [수정 핵심] 여기도 timeout=3.0을 timeout=5.0으로 변경!
-            async with session.get(url, params=params, timeout=5.0) as response: 
+            # 🌟 Vercel 앱 멈춤 방지를 위해 1.5초 타임아웃 설정
+            async with session.get(url, params=params, timeout=1.5) as response: 
                 if response.status == 200:
                     data = await response.json()
                     body = data.get("response", {}).get("body", {})
@@ -158,12 +129,14 @@ async def fetch_tago_bus_arrivals(node_id: str, city_code: str) -> dict:
                         times.sort()
                         result[bus] = [f"{t}분" if t > 0 else "곧 도착" for t in times][:2]
                     return result
+    except asyncio.TimeoutError:
+        print("⏳ [TAGO 버스 정보] 1.5초 초과 (응답 지연) - 앱 멈춤 방지를 위해 패스합니다.")
     except Exception as e: 
         print(f"TAGO 버스 정보 에러: {traceback.format_exc()}")
     return {}
 
 # =====================================================================
-# TMAP 지오코딩 및 길찾기 핵심 로직 (기존 기능 유지)
+# TMAP 지오코딩 및 길찾기 핵심 로직 
 # =====================================================================
 async def get_coords_from_tmap(place_name: str) -> tuple[float, float]:
     url = "https://apis.openapi.sk.com/tmap/pois"
@@ -222,7 +195,7 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                     for leg in path.get("legs", []):
                         mode = leg.get("mode", "WALK")
                         
-                        # 🌟 1. 핵심: LOCALBUS, TOWNBUS 등 이름에 BUS가 들어가면 무조건 "BUS"로 묶기
+                        # 버스 타입 통합
                         if "BUS" in mode: 
                             mode = "BUS"
                         elif mode == "TRAIN": 
@@ -237,7 +210,6 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                         
                         if mode == "WALK":
                             instruction = "도보 이동"
-                            # ... [기존 linestring 파싱 로직 유지] ...
                             for step in leg.get("steps", []):
                                 ls = step.get("linestring", "") or step.get("lineString", "")
                                 path_coords.extend(parse_linestring(ls))
@@ -254,11 +226,9 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                                     station_id = pass_stops[0].get("stationID", "")
                                     s_lat, s_lon = pass_stops[0].get("lat", s_lat), pass_stops[0].get("lon", s_lon)
                             
-                            # 🌟 2. 수정됨: 좌표를 활용한 무적 버스 정보 매칭
                             if mode == "BUS" and s_lat and s_lon:
                                 cache_key = f"{s_lat}_{s_lon}"
                                 if cache_key not in tago_cache:
-                                    # TMAP 정류장 번호를 버리고, 위경도로 공공데이터 서버의 진짜 ID를 찾아냅니다.
                                     city_code, tago_node_id = await get_tago_node_info(float(s_lat), float(s_lon))
                                     if tago_node_id:
                                         tago_cache[cache_key] = await fetch_tago_bus_arrivals(tago_node_id, city_code)
@@ -269,7 +239,6 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                                 
                                 for r_name in route_names:
                                     times = []
-                                    # "143" vs "간선 143" 유연하게 텍스트 포함 여부로 매칭
                                     for tago_bus_no, tago_times in real_time_data.items():
                                         if str(tago_bus_no) in r_name or r_name in str(tago_bus_no):
                                             times = tago_times
@@ -279,7 +248,6 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                                     arr2 = times[1] if len(times) > 1 else None
                                     transit_options.append(TransitOption(routeName=r_name, arrivalTime1=arr1, arrivalTime2=arr2))
                             
-                            # 지하철인 경우 (기존 코드 유지)
                             elif mode == "SUBWAY":
                                 for r_name in route_names:
                                     times = await fetch_seoul_subway_arrivals(start_name, r_name)
