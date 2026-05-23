@@ -5,6 +5,7 @@ import itertools
 import urllib.parse
 import re
 import asyncio  
+import json  
 from fastapi import HTTPException
 from api.schemas import RouteRequest, RouteResponse, RouteSegment, LocationPoint, Coordinate, TransitOption
 
@@ -55,46 +56,33 @@ async def fetch_seoul_subway_arrivals(station_name: str, target_line: str) -> li
                                 
                     return list(dict.fromkeys(times))[:2]
     except Exception as e: 
-        print(f"지하철 실시간 에러 상세: {traceback.format_exc()}")
+        pass
         
     return []
 
 # =====================================================================
-# [Step 1] 주변 정류장 3개 정보 가져오기 (표준 params 구조로 원복)
+# [Step 1] 주변 정류장 2개 정보 가져오기 
 # =====================================================================
 async def get_tago_nodes(lat: float, lon: float, session: aiohttp.ClientSession) -> list[tuple[str, str]]:
-    if not TAGO_API_KEY: 
-        print("🚨 [TAGO 에러] TAGO_API_KEY 환경변수가 설정되지 않았습니다.")
-        return []
+    if not TAGO_API_KEY: return []
     
-    # 🌟 수동 스트링 조립을 버리고 가이드라인에 명시된 순수 http 주소 규격을 적용합니다.
     url = "http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList"
-    
-    # 🌟 16진수 키이므로 변조 없이 담백하게 params 딕셔너리로 넘겨야 방화벽이 차단하지 않습니다.
     params = {
         "serviceKey": TAGO_API_KEY.strip(),
         "gpsLati": str(lat),
         "gpsLong": str(lon),
         "_type": "json",
-        "numOfRows": "3",
+        "numOfRows": "2",  # 🌟 트래픽 최소화를 위해 상/하행 2개만 추출
         "pageNo": "1"
     }
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
     
     try:
         async with session.get(url, params=params, headers=headers, timeout=3.0) as response:
-            if response.status != 200:
-                print(f"🚨 [TAGO 정류장 에러] HTTP 상태 코드: {response.status}")
-                return []
-                
+            if response.status != 200: return []
             try:
                 data = await response.json()
             except Exception:
-                text = await response.text()
-                print(f"🚨 [TAGO 정류장 파싱 에러] 응답이 JSON이 아닙니다 본문:\n{text}")
                 return []
             
             items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
@@ -104,52 +92,37 @@ async def get_tago_nodes(lat: float, lon: float, session: aiohttp.ClientSession)
             for it in items:
                 city = str(it.get("citycode", ""))
                 node = str(it.get("nodeid", ""))
-                if city and node:
-                    nodes.append((city, node))
+                if city and node: nodes.append((city, node))
             return nodes
-    except asyncio.TimeoutError:
-        print(f"⏳ [TAGO 정류장] 3.0초 시간 초과 (좌표: {lat}, {lon})")
-    except Exception as e:
-        print(f"🚨 [TAGO 정류장 시스템 에러]: {str(e)}")
-    return []
+    except Exception:
+        return []
 
 # =====================================================================
-# [Step 2] 버스 도착 정보 가져오기 (표준 params 구조로 원복)
+# [Step 2] 버스 도착 정보 가져오기 
 # =====================================================================
 async def fetch_tago_bus_arrivals(node_id: str, city_code: str, session: aiohttp.ClientSession) -> dict:
     if not TAGO_API_KEY: return {}
     
-    # 🌟 활용 가이드에 명시된 순수 http 대중교통 도착 서비스 주소 규격 적용
     url = "http://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList"
-    
     params = {
         "serviceKey": TAGO_API_KEY.strip(),
         "cityCode": str(city_code),
         "nodeId": str(node_id),
         "_type": "json",
-        "numOfRows": "30",
+        "numOfRows": "20",
         "pageNo": "1"
     }
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
     
     try:
         async with session.get(url, params=params, headers=headers, timeout=3.0) as response: 
-            if response.status != 200:
-                return {}
-                
+            if response.status != 200: return {}
             try:
                 data = await response.json()
             except Exception:
                 return {}
             
-            body = data.get("response", {}).get("body", {})
-            if not body or "items" not in body or not body["items"]:
-                return {}
-            
-            items = body.get("items", {}).get("item", [])
+            items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
             if isinstance(items, dict): items = [items]
             
             bus_info = {}
@@ -164,21 +137,27 @@ async def fetch_tago_bus_arrivals(node_id: str, city_code: str, session: aiohttp
                 times.sort()
                 result[bus] = [f"{t}분" if t > 0 else "곧 도착" for t in times][:2]
             return result
-    except asyncio.TimeoutError:
-        print(f"⏳ [TAGO 버스도착] 3.0초 시간 초과 (NodeID: {node_id})")
-    except Exception as e:
-        print(f"🚨 [TAGO 버스도착 시스템 에러]: {str(e)}")
-    return {}
+    except Exception:
+        return {}
 
 # =====================================================================
-# [Step 3] 3개 정류장의 데이터를 하나로 통합 캐싱 (병렬 처리)
+# [Step 3] 병렬 처리 + 🌟 신호등(Semaphore)으로 정부 서버 DDoS 차단 방어
 # =====================================================================
-async def fetch_and_cache(lat_str: str, lon_str: str, session: aiohttp.ClientSession):
-    nodes = await get_tago_nodes(float(lat_str), float(lon_str), session)
+async def fetch_and_cache(lat_str: str, lon_str: str, session: aiohttp.ClientSession, sem: asyncio.Semaphore):
+    # 1. 정류장 조회할 때도 3개씩만 진입
+    async with sem:
+        nodes = await get_tago_nodes(float(lat_str), float(lon_str), session)
+        
     merged_bus_info = {}
     if nodes:
-        tasks = [fetch_tago_bus_arrivals(node, city, session) for city, node in nodes]
+        # 2. 도착 정보 조회할 때도 3개씩만 진입하도록 통제 (핵심 방어막)
+        async def bounded_fetch(node, city):
+            async with sem:
+                return await fetch_tago_bus_arrivals(node, city, session)
+                
+        tasks = [bounded_fetch(node, city) for city, node in nodes]
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        
         for res in results:
             if isinstance(res, dict):
                 for bus_no, times in res.items():
@@ -196,7 +175,7 @@ async def fetch_and_cache(lat_str: str, lon_str: str, session: aiohttp.ClientSes
     return f"{lat_str}_{lon_str}", merged_bus_info
 
 # =====================================================================
-# TMAP 지오코딩 및 길찾기 핵심 로직 (기존 유지)
+# TMAP 지오코딩 및 길찾기 핵심 로직 
 # =====================================================================
 async def get_coords_from_tmap(place_name: str) -> tuple[float, float]:
     url = "https://apis.openapi.sk.com/tmap/pois"
@@ -220,7 +199,9 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
     payload = {"startX": str(start.longitude), "startY": str(start.latitude), "endX": str(end.longitude), "endY": str(end.latitude), "count": 10, "lang": 0, "format": "json"}
     if search_date: payload["searchDttm"] = search_date
 
-    async with aiohttp.ClientSession() as session: 
+    # 🌟 TCP 커넥션 풀 자체를 제한하여 추가적인 부하 방지
+    connector = aiohttp.TCPConnector(limit_per_host=4)
+    async with aiohttp.ClientSession(connector=connector) as session: 
         async with session.post(url, headers=headers, json=payload) as response:
             if response.status != 200: raise HTTPException(status_code=500, detail="TMAP 연동 실패")
             data = await response.json()
@@ -258,7 +239,9 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
 
                 tago_cache = {}
                 if unique_bus_coords:
-                    tasks = [fetch_and_cache(lat, lon, session) for lat, lon in unique_bus_coords]
+                    # 🌟 한 번에 3개의 요청만 정부 서버로 보내는 신호등 작동
+                    sem = asyncio.Semaphore(3)
+                    tasks = [fetch_and_cache(lat, lon, session, sem) for lat, lon in unique_bus_coords]
                     results = await asyncio.gather(*tasks, return_exceptions=True)
                     for res in results:
                         if not isinstance(res, Exception):
