@@ -26,7 +26,7 @@ async def get_coords_from_tmap(place_name: str) -> tuple[float, float]:
     raise HTTPException(status_code=400, detail=f"'{place_name}' 장소를 찾을 수 없습니다.")
 
 # [변경됨] 단일 RouteResponse가 아닌, RouteResponse들의 리스트를 반환합니다.
-async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt_type: str) -> list[RouteResponse]:
+async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt_type: str, search_date: str = None) -> list[RouteResponse]:
     if start.latitude == end.latitude and start.longitude == end.longitude:
         return [RouteResponse(
             totalTimeMin=0, totalFareWon=0, totalWalkDistanceMeter=0,
@@ -48,6 +48,10 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
         "endX": str(end.longitude), "endY": str(end.latitude),
         "count": 10, "lang": 0, "format": "json"
     }
+    
+    # 🌟 [추가됨] 안드로이드가 넘겨준 시간(search_date)이 존재하면 payload에 추가
+    if search_date:
+        payload["searchDttm"] = search_date
 
     async with aiohttp.ClientSession() as session:
         async with session.post(url, headers=headers, json=payload) as response:
@@ -61,7 +65,8 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                 if not itineraries:
                     raise HTTPException(status_code=400, detail="요청하신 구간의 대중교통 경로가 없습니다.")
 
-                # 최적화 타입 정렬
+                # ... (이하 기존 정렬 및 파싱 로직 코드는 동일하게 유지) ...
+                # (아래 코드는 기존 내용 그대로입니다. 덮어쓰기 편하시도록 주요 부분만 남겼습니다.)
                 if opt_type == "MIN_TIME": itineraries.sort(key=lambda x: x.get("totalTime", 999999))
                 elif opt_type == "MIN_COST": itineraries.sort(key=lambda x: x.get("fare", {}).get("regular", {}).get("totalFare", 999999))
                 elif opt_type == "MIN_TRANSFER": itineraries.sort(key=lambda x: x.get("transferCount", 99))
@@ -80,7 +85,6 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                             except ValueError: continue
                     return coords
 
-                # [변경됨] 첫 번째 요소(best_path)만 쓰지 않고 최대 10개까지 모두 순회하여 리스트에 담습니다.
                 for path in itineraries[:10]:
                     total_time = path.get("totalTime", 0) // 60
                     total_fare = path.get("fare", {}).get("regular", {}).get("totalFare", 0)
@@ -127,13 +131,13 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                         totalWalkDistanceMeter=total_walk, segments=segments
                     ))
                 
-                return parsed_routes # 최대 10개의 경로 리스트 반환
+                return parsed_routes
             except Exception as e:
                 traceback.print_exc()
                 raise HTTPException(status_code=500, detail=f"TMAP 경로 데이터 파싱 오류: {str(e)}")
 
 
-async def process_optimized_route(request: RouteRequest): # -> 반환 타입은 FastAPI가 자동으로 JSON 맵핑합니다.
+async def process_optimized_route(request: RouteRequest):
     all_points = [request.startPoint] + request.anchorPoints + [request.endPoint]
     
     for point in all_points:
@@ -142,20 +146,19 @@ async def process_optimized_route(request: RouteRequest): # -> 반환 타입은 
             point.longitude = lon
             point.latitude = lat
 
-    # [변경됨] 각 구간(Leg)별로 여러 개의 경로(최대 10개)를 모두 받아옵니다.
     legs_alternatives = []
     for i in range(len(all_points) - 1):
         alts = await fetch_segments_from_tmap(
             start=all_points[i], 
             end=all_points[i+1], 
-            opt_type=request.optimizationType.value
+            opt_type=request.optimizationType.value,
+            search_date=request.searchDate # 🌟 [추가됨] 안드로이드가 넘긴 시간을 TMAP 조회 함수로 전달
         )
         legs_alternatives.append(alts)
 
-    # [변경됨] 각 구간의 경로들을 조합(Cartesian Product)하여 전체 여정의 경우의 수를 만듭니다.
+    # ... (이하 조합 및 반환 로직은 완전히 동일하므로 생략하지 않고 쓰시던 코드 유지하시면 됩니다) ...
     all_combinations = list(itertools.product(*legs_alternatives))
 
-    # [변경됨] 조합된 전체 여정 리스트를 사용자가 요청한 최적화 옵션에 따라 다시 전체 정렬합니다.
     if request.optimizationType.value == "MIN_TIME":
         all_combinations.sort(key=lambda combo: sum(r.totalTimeMin for r in combo))
     elif request.optimizationType.value == "MIN_COST":
@@ -163,7 +166,6 @@ async def process_optimized_route(request: RouteRequest): # -> 반환 타입은 
     elif request.optimizationType.value == "MIN_WALK":
         all_combinations.sort(key=lambda combo: sum(r.totalWalkDistanceMeter for r in combo))
 
-    # 상위 10개의 최종 경로 조합만 선택
     top_10_combinations = all_combinations[:10]
 
     final_routes = []
@@ -177,7 +179,6 @@ async def process_optimized_route(request: RouteRequest): # -> 반환 타입은 
             total_walk += route.totalWalkDistanceMeter
             merged_segments.extend(route.segments)
 
-            # 구간과 구간 사이에 대기(WAIT) 세그먼트 추가 (경유지가 있을 경우)
             if idx < len(combo) - 1:
                 wait_point = all_points[idx + 1]
                 merged_segments.append(RouteSegment(
@@ -193,5 +194,4 @@ async def process_optimized_route(request: RouteRequest): # -> 반환 타입은 
             endCoordinate=Coordinate(latitude=all_points[-1].latitude, longitude=all_points[-1].longitude)
         ))
 
-    # [중요] 안드로이드가 기대하는 RouteListResponse 형태인 {"routes": [ ... ]} 딕셔너리로 반환합니다.
     return {"routes": final_routes}

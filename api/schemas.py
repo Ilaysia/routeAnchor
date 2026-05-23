@@ -13,7 +13,6 @@ class LocationPoint(BaseModel):
     latitude: float
     longitude: float
 
-# 새로 추가된 위경도 좌표 데이터 모델
 class Coordinate(BaseModel):
     latitude: float
     longitude: float
@@ -24,7 +23,6 @@ class RouteSegment(BaseModel):
     durationMin: int
     startLocationName: str
     endLocationName: str
-    
     pathCoordinates: Optional[List[Coordinate]] = None
     stationId: Optional[str] = None
     realTimeArrivalInfo: Optional[str] = None
@@ -34,6 +32,7 @@ class RouteRequest(BaseModel):
     anchorPoints: List[LocationPoint]
     endPoint: LocationPoint
     optimizationType: OptType
+    searchDate: Optional[str] = None  # 🌟 [추가] yyyyMMddHHmm 형식의 시간 데이터 수신용
 
 class RouteResponse(BaseModel):
     totalTimeMin: int
