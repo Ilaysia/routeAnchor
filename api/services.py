@@ -22,19 +22,21 @@ async def fetch_seoul_subway_arrivals(station_name: str, target_line: str) -> li
     if not SEOUL_SUBWAY_API_KEY or SEOUL_SUBWAY_API_KEY == "sample":
         print("경고: 서울 지하철 API 키가 등록되지 않아 'sample' 키로 작동 중입니다.")
         
-    # 1. 역 이름 정제: "강남역(2호선)", "강남역", "강남" 모두 -> "강남" 으로 통일
     clean_name = re.split(r'역|\(', station_name)[0].strip()
-    
-    # 2. 한글 URL 인코딩 (필수: 한글 깨짐 방지)
     encoded_name = urllib.parse.quote(clean_name)
-    
     url = f"http://swopenapi.seoul.go.kr/api/subway/{SEOUL_SUBWAY_API_KEY}/json/realtimeStationArrival/0/10/{encoded_name}"
+    
+    # 🌟 [추가] 어떤 역, 어떤 호선을 요청하는지 확인
+    print(f"🚇 [지하철 요청] 역: {clean_name}, 호선: {target_line}") 
     
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=3.0) as response:
                 if response.status == 200:
                     data = await response.json()
+                    # 🌟 [추가] 공공데이터 서버가 도대체 뭐라고 답변했는지 확인!
+                    print(f"🚇 [지하철 응답] {data}") 
+                    
                     times = []
                     
                     for item in data.get("realtimeArrivalList", []):
@@ -98,11 +100,17 @@ async def fetch_tago_bus_arrivals(station_id: str, city_code: str) -> dict:
         "numOfRows": "50",
         "pageNo": "1"
     }
+    
+    # 🌟 [추가] 어떤 정류장, 어떤 도시코드로 요청하는지 확인
+    print(f"🚌 [버스 요청] 정류장ID: {station_id}, 도시코드: {city_code}")
+    
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params, timeout=3.0) as response: 
                 if response.status == 200:
                     data = await response.json()
+                    # 🌟 [추가] TAGO 서버가 에러 코드를 뱉는지 확인!
+                    print(f"🚌 [버스 응답] {data}")
                     body = data.get("response", {}).get("body", {})
                     if not body or "items" not in body or not body["items"]:
                         return {}
