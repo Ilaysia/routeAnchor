@@ -5,6 +5,7 @@ import itertools
 import urllib.parse
 import re
 import asyncio  
+import json  # 🌟 안전한 JSON 파싱을 위해 추가
 from fastapi import HTTPException
 from api.schemas import RouteRequest, RouteResponse, RouteSegment, LocationPoint, Coordinate, TransitOption
 
@@ -57,74 +58,77 @@ async def fetch_seoul_subway_arrivals(station_name: str, target_line: str) -> li
     return []
 
 # =====================================================================
-# [Step 1] 주변 정류장 3개(상/하행 포함) 모두 가져오기 
+# [Step 1] 주변 정류장 3개 모두 가져오기 (인코딩 우회 및 에러 추적 강화)
 # =====================================================================
 async def get_tago_nodes(lat: float, lon: float, session: aiohttp.ClientSession) -> list[tuple[str, str]]:
-    if not TAGO_API_KEY: return []
-    url = "http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList"
-    params = {
-        "serviceKey": urllib.parse.unquote(TAGO_API_KEY),
-        "gpsLati": str(lat),
-        "gpsLong": str(lon),
-        "_type": "json",
-        "numOfRows": "3",  # 🌟 건너편 정류장 놓침 방지를 위해 3개 스캔
-        "pageNo": "1"
-    }
+    if not TAGO_API_KEY: 
+        print("🚨 [TAGO 에러] TAGO_API_KEY 환경변수가 설정되지 않았습니다.")
+        return []
+    
+    # 🌟 중요: 라이브러리의 자동 인코딩을 우회하기 위해 URL 스트링에 Key를 직접 주입합니다.
+    url = f"http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList?serviceKey={TAGO_API_KEY}&gpsLati={lat}&gpsLong={lon}&_type=json&numOfRows=3&pageNo=1"
+    
     try:
-        async with session.get(url, params=params, timeout=2.5) as response:
-            if response.status == 200:
-                try:
-                    data = await response.json()
-                except Exception:
-                    return []
-                items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
-                if isinstance(items, dict): items = [items]
-                nodes = []
-                for it in items:
-                    city = str(it.get("citycode", ""))
-                    node = str(it.get("nodeid", ""))
-                    if city and node:
-                        nodes.append((city, node))
-                return nodes
-    except Exception:
-        pass
+        async with session.get(url, timeout=3.0) as response:
+            text = await response.text()
+            
+            # 공공데이터포털 고질적 에러 검사
+            if "SERVICE_KEY_IS_NOT_REGISTERED" in text:
+                print("🚨 [TAGO 에러] 버스 API 키가 잘못되었거나 미승인 상태입니다. (SERVICE_KEY_IS_NOT_REGISTERED_ERROR)")
+                return []
+            
+            data = json.loads(text)
+            items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
+            if isinstance(items, dict): items = [items]
+            
+            nodes = []
+            for it in items:
+                city = str(it.get("citycode", ""))
+                node = str(it.get("nodeid", ""))
+                if city and node:
+                    nodes.append((city, node))
+            return nodes
+    except asyncio.TimeoutError:
+        print(f"⏳ [TAGO 정류장] 3.0초 시간 초과로 패스함 (좌표: {lat}, {lon})")
+    except Exception as e:
+        print(f"🚨 [TAGO 정류장 파싱 에러]: {str(e)}")
     return []
 
 # =====================================================================
-# [Step 2] 특정 정류장의 버스 도착 정보 가져오기
+# [Step 2] 특정 정류장의 버스 도착 정보 가져오기 (인코딩 우회 및 에러 추적 강화)
 # =====================================================================
 async def fetch_tago_bus_arrivals(node_id: str, city_code: str, session: aiohttp.ClientSession) -> dict:
-    url = "http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getSttnAcctoArvlPrearngeInfoList"
-    params = {
-        "serviceKey": urllib.parse.unquote(TAGO_API_KEY),
-        "cityCode": city_code,
-        "nodeId": node_id,
-        "_type": "json",
-        "numOfRows": "30",
-        "pageNo": "1"
-    }
+    if not TAGO_API_KEY: return {}
+    
+    # 🌟 여기도 URL 스트링에 Key를 직접 주입하여 이중 인코딩 방지
+    url = f"http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getSttnAcctoArvlPrearngeInfoList?serviceKey={TAGO_API_KEY}&cityCode={city_code}&nodeId={node_id}&_type=json&numOfRows=30&pageNo=1"
+    
     try:
-        async with session.get(url, params=params, timeout=2.5) as response: 
-            if response.status == 200:
-                try:
-                    data = await response.json()
-                except Exception:
-                    return {}
-                items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
-                if isinstance(items, dict): items = [items]
-                bus_info = {}
-                for item in items:
-                    route_no = str(item.get("routeno"))
-                    arr_time_min = item.get("arrtime", 0) // 60
-                    if route_no not in bus_info: bus_info[route_no] = []
-                    bus_info[route_no].append(arr_time_min)
-                result = {}
-                for bus, times in bus_info.items():
-                    times.sort()
-                    result[bus] = [f"{t}분" if t > 0 else "곧 도착" for t in times][:2]
-                return result
-    except Exception:
-        pass
+        async with session.get(url, timeout=3.0) as response: 
+            text = await response.text()
+            if "SERVICE_KEY_IS_NOT_REGISTERED" in text:
+                return {}
+            
+            data = json.loads(text)
+            items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
+            if isinstance(items, dict): items = [items]
+            
+            bus_info = {}
+            for item in items:
+                route_no = str(item.get("routeno"))
+                arr_time_min = item.get("arrtime", 0) // 60
+                if route_no not in bus_info: bus_info[route_no] = []
+                bus_info[route_no].append(arr_time_min)
+                
+            result = {}
+            for bus, times in bus_info.items():
+                times.sort()
+                result[bus] = [f"{t}분" if t > 0 else "곧 도착" for t in times][:2]
+            return result
+    except asyncio.TimeoutError:
+        print(f"⏳ [TAGO 버스도착] 3.0초 시간 초과로 패스함 (NodeID: {node_id})")
+    except Exception as e:
+        print(f"🚨 [TAGO 버스도착 파싱 에러]: {str(e)}")
     return {}
 
 # =====================================================================
@@ -134,7 +138,6 @@ async def fetch_and_cache(lat_str: str, lon_str: str, session: aiohttp.ClientSes
     nodes = await get_tago_nodes(float(lat_str), float(lon_str), session)
     merged_bus_info = {}
     if nodes:
-        # 3개 정류장을 동시에 병렬로 질의하여 속도 극대화
         tasks = [fetch_tago_bus_arrivals(node, city, session) for city, node in nodes]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for res in results:
@@ -143,7 +146,6 @@ async def fetch_and_cache(lat_str: str, lon_str: str, session: aiohttp.ClientSes
                     if bus_no not in merged_bus_info:
                         merged_bus_info[bus_no] = times
                     else:
-                        # 중복 시간 제거 및 병합
                         all_times = merged_bus_info[bus_no] + times
                         seen = set()
                         unique_times = []
@@ -179,7 +181,7 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
     payload = {"startX": str(start.longitude), "startY": str(start.latitude), "endX": str(end.longitude), "endY": str(end.latitude), "count": 10, "lang": 0, "format": "json"}
     if search_date: payload["searchDttm"] = search_date
 
-    async with aiohttp.ClientSession() as session: # 🌟 하나의 세션 재사용
+    async with aiohttp.ClientSession() as session: 
         async with session.post(url, headers=headers, json=payload) as response:
             if response.status != 200: raise HTTPException(status_code=500, detail="TMAP 연동 실패")
             data = await response.json()
@@ -202,7 +204,6 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                             except ValueError: continue
                     return coords
 
-                # 🌟 [캐시 준비] 10개 경로의 모든 버스 정류장 좌표를 먼저 수집하여 한방에 요청
                 unique_bus_coords = set()
                 for path in itineraries[:10]:
                     for leg in path.get("legs", []):
@@ -218,7 +219,6 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
 
                 tago_cache = {}
                 if unique_bus_coords:
-                    # 모든 버스 정류장의 실시간 데이터를 동시에(병렬) 다운로드
                     tasks = [fetch_and_cache(lat, lon, session) for lat, lon in unique_bus_coords]
                     results = await asyncio.gather(*tasks, return_exceptions=True)
                     for res in results:
@@ -226,7 +226,6 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                             k, v = res
                             tago_cache[k] = v
 
-                # 실제 파싱 진행
                 parsed_routes = []
                 for path in itineraries[:10]:
                     total_time = path.get("totalTime", 0) // 60
@@ -270,11 +269,9 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                                 
                                 for r_name in route_names:
                                     times = []
-                                    # 🌟 정규식을 통해 "마을", "일반" 등 한글을 제거하고 순수 버스 번호(예: "6-3")만 추출
                                     r_clean = re.sub(r'[^a-zA-Z0-9\-]', '', r_name)
                                     for tago_bus_no, tago_times in real_time_data.items():
                                         tago_clean = re.sub(r'[^a-zA-Z0-9\-]', '', tago_bus_no)
-                                        # 정확히 일치하거나, 번호에 포함되어 있으면 매칭!
                                         if r_clean and tago_clean and (r_clean == tago_clean or tago_clean in r_clean):
                                             times = tago_times
                                             break
