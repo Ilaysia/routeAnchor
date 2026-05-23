@@ -16,15 +16,10 @@ TAGO_API_KEY = os.environ.get("TAGO_API_KEY")
 SEOUL_SUBWAY_API_KEY = os.environ.get("SEOUL_SUBWAY_API_KEY")
 
 # =====================================================================
-# 🌟 [수정] 서울/수도권 지하철 실시간 도착 정보 조회 (중복 제거 및 로직 통합)
-# =====================================================================
-# =====================================================================
 # 🌟 [수정] 서울/수도권 지하철 실시간 도착 정보 조회 (NoneType 방어 및 호선 매칭 강화)
 # =====================================================================
 async def fetch_seoul_subway_arrivals(station_name: str, target_line: str) -> list:
-    if not SEOUL_SUBWAY_API_KEY or SEOUL_SUBWAY_API_KEY == "sample":
-        print("경고: 서울 지하철 API 키가 등록되지 않아 'sample' 키로 작동 중입니다.")
-        
+
     # 마침표(.)나 가운뎃점(·)이 포함된 부역명까지 깔끔하게 잘라냅니다.
     clean_name = re.split(r'역|\(|\.|·', station_name)[0].strip()
     encoded_name = urllib.parse.quote(clean_name)
@@ -96,29 +91,56 @@ async def get_tago_city_code(lat: float, lon: float) -> str:
 # =====================================================================
 # [Step 2] TAGO 버스 실시간 도착 정보 조회
 # =====================================================================
-async def fetch_tago_bus_arrivals(station_id: str, city_code: str) -> dict:
-    if not TAGO_API_KEY or not station_id: return {}
+# =====================================================================
+# [Step 1] 🌟 수정됨: TMAP 좌표를 이용해 공공데이터(TAGO) 공식 정류장 ID 찾기
+# =====================================================================
+async def get_tago_node_info(lat: float, lon: float) -> tuple[str, str]:
+    if not TAGO_API_KEY: return "31190", ""
+    
+    url = "http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList"
+    params = {
+        "serviceKey": urllib.parse.unquote(TAGO_API_KEY),
+        "gpsLati": str(lat),
+        "gpsLong": str(lon),
+        "_type": "json",
+        "numOfRows": "1", # 가장 가까운 정류장 1개만 조회
+        "pageNo": "1"
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=2.0) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
+                    if isinstance(items, dict): items = [items]
+                    if items:
+                        return str(items[0].get("citycode", "31190")), str(items[0].get("nodeid", ""))
+    except Exception as e: 
+        print(f"TAGO 정류장 매칭 에러: {traceback.format_exc()}")
+    return "31190", ""
+
+# =====================================================================
+# [Step 2] 🌟 수정됨: 공식 Node ID로 버스 실시간 도착 정보 조회
+# =====================================================================
+async def fetch_tago_bus_arrivals(node_id: str, city_code: str) -> dict:
+    if not TAGO_API_KEY or not node_id: return {}
+    
+    print(f"🚌 [버스 요청] 공식 정류장ID: {node_id}, 도시코드: {city_code}")
     
     url = "http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getSttnAcctoArvlPrearngeInfoList"
     params = {
         "serviceKey": urllib.parse.unquote(TAGO_API_KEY),
         "cityCode": str(city_code),
-        "nodeId": str(station_id),
+        "nodeId": str(node_id),
         "_type": "json",
         "numOfRows": "50",
         "pageNo": "1"
     }
-    
-    # 🌟 [추가] 어떤 정류장, 어떤 도시코드로 요청하는지 확인
-    print(f"🚌 [버스 요청] 정류장ID: {station_id}, 도시코드: {city_code}")
-    
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params, timeout=3.0) as response: 
                 if response.status == 200:
                     data = await response.json()
-                    # 🌟 [추가] TAGO 서버가 에러 코드를 뱉는지 확인!
-                    print(f"🚌 [버스 응답] {data}")
                     body = data.get("response", {}).get("body", {})
                     if not body or "items" not in body or not body["items"]:
                         return {}
