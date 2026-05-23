@@ -4,7 +4,7 @@ import traceback
 import itertools
 import urllib.parse
 import re
-import asyncio  # 🌟 [필수] 타임아웃 에러를 방어하기 위한 모듈
+import asyncio  # 타임아웃 및 병렬 처리를 위한 필수 모듈
 from fastapi import HTTPException
 from api.schemas import RouteRequest, RouteResponse, RouteSegment, LocationPoint, Coordinate, TransitOption
 
@@ -73,8 +73,8 @@ async def get_tago_node_info(lat: float, lon: float) -> tuple[str, str]:
     }
     try:
         async with aiohttp.ClientSession() as session:
-            # 🌟 Vercel 앱 멈춤 방지를 위해 1.5초 타임아웃 설정
-            async with session.get(url, params=params, timeout=1.5) as response:
+            # 병렬 처리이므로 안전하게 3.0초 대기
+            async with session.get(url, params=params, timeout=3.0) as response:
                 if response.status == 200:
                     data = await response.json()
                     items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
@@ -82,9 +82,9 @@ async def get_tago_node_info(lat: float, lon: float) -> tuple[str, str]:
                     if items:
                         return str(items[0].get("citycode", "31190")), str(items[0].get("nodeid", ""))
     except asyncio.TimeoutError:
-        print("⏳ [TAGO 정류장] 1.5초 초과 (응답 지연) - 앱 멈춤 방지를 위해 패스합니다.")
+        print("⏳ [TAGO 정류장] 3.0초 초과 (응답 지연)")
     except Exception as e: 
-        print(f"TAGO 정류장 매칭 에러: {traceback.format_exc()}")
+        print(f"TAGO 정류장 매칭 에러: {e}")
     return "31190", ""
 
 # =====================================================================
@@ -92,8 +92,6 @@ async def get_tago_node_info(lat: float, lon: float) -> tuple[str, str]:
 # =====================================================================
 async def fetch_tago_bus_arrivals(node_id: str, city_code: str) -> dict:
     if not TAGO_API_KEY or not node_id: return {}
-    
-    print(f"🚌 [버스 요청] 공식 정류장ID: {node_id}, 도시코드: {city_code}")
     
     url = "http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getSttnAcctoArvlPrearngeInfoList"
     params = {
@@ -106,8 +104,8 @@ async def fetch_tago_bus_arrivals(node_id: str, city_code: str) -> dict:
     }
     try:
         async with aiohttp.ClientSession() as session:
-            # 🌟 Vercel 앱 멈춤 방지를 위해 1.5초 타임아웃 설정
-            async with session.get(url, params=params, timeout=1.5) as response: 
+            # 병렬 처리이므로 안전하게 3.0초 대기
+            async with session.get(url, params=params, timeout=3.0) as response: 
                 if response.status == 200:
                     data = await response.json()
                     body = data.get("response", {}).get("body", {})
@@ -130,13 +128,13 @@ async def fetch_tago_bus_arrivals(node_id: str, city_code: str) -> dict:
                         result[bus] = [f"{t}분" if t > 0 else "곧 도착" for t in times][:2]
                     return result
     except asyncio.TimeoutError:
-        print("⏳ [TAGO 버스 정보] 1.5초 초과 (응답 지연) - 앱 멈춤 방지를 위해 패스합니다.")
+        print("⏳ [TAGO 버스 정보] 3.0초 초과 (응답 지연)")
     except Exception as e: 
-        print(f"TAGO 버스 정보 에러: {traceback.format_exc()}")
+        print(f"TAGO 버스 정보 에러: {e}")
     return {}
 
 # =====================================================================
-# TMAP 지오코딩 및 길찾기 핵심 로직 
+# TMAP 지오코딩 및 길찾기 핵심 로직
 # =====================================================================
 async def get_coords_from_tmap(place_name: str) -> tuple[float, float]:
     url = "https://apis.openapi.sk.com/tmap/pois"
@@ -173,7 +171,6 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                 elif opt_type == "MIN_TRANSFER": itineraries.sort(key=lambda x: x.get("transferCount", 99))
                 elif opt_type == "MIN_WALK": itineraries.sort(key=lambda x: x.get("totalWalkDistance", 999999))
 
-                parsed_routes = []
                 def parse_linestring(ls_str: str) -> list[Coordinate]:
                     coords = []
                     if not ls_str: return coords
@@ -184,8 +181,40 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                             except ValueError: continue
                     return coords
 
-                tago_cache = {}
+                # 🌟 [혁신 핵심] 1. 검색된 10개 경로 안의 모든 버스 정류장 고유 좌표를 미리 수집
+                unique_bus_coords = set()
+                for path in itineraries[:10]:
+                    for leg in path.get("legs", []):
+                        mode = leg.get("mode", "WALK")
+                        if "BUS" in mode:
+                            s_lat, s_lon = leg.get("start", {}).get("lat"), leg.get("start", {}).get("lon")
+                            if not leg.get("start", {}).get("stationId"):
+                                pass_stops = leg.get("passStopList", {}).get("stationList", [])
+                                if pass_stops:
+                                    s_lat, s_lon = pass_stops[0].get("lat", s_lat), pass_stops[0].get("lon", s_lon)
+                            if s_lat and s_lon:
+                                unique_bus_coords.add((str(s_lat), str(s_lon)))
 
+                # 🌟 2. 여러 개의 정류장을 '동시에(병렬로)' 공공데이터 서버에 질의하여 시간 단축
+                tago_cache = {}
+                if unique_bus_coords:
+                    async def fetch_and_cache(lat_str, lon_str):
+                        city, node = await get_tago_node_info(float(lat_str), float(lon_str))
+                        if node:
+                            data_dict = await fetch_tago_bus_arrivals(node, city)
+                            return f"{lat_str}_{lon_str}", data_dict
+                        return f"{lat_str}_{lon_str}", {}
+
+                    # gather를 통해 모든 정류장 통신을 한방에 묶어서 발사 (Vercel 타임아웃 절대 방어)
+                    tasks = [fetch_and_cache(lat, lon) for lat, lon in unique_bus_coords]
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    for res in results:
+                        if not isinstance(res, Exception):
+                            k, v = res
+                            tago_cache[k] = v
+
+                # 3. 이제 순차적으로 파싱 진행 (버스는 미리 구해둔 캐시에서 0.01초 만에 꺼내씀)
+                parsed_routes = []
                 for path in itineraries[:10]:
                     total_time = path.get("totalTime", 0) // 60
                     total_fare = path.get("fare", {}).get("regular", {}).get("totalFare", 0)
@@ -194,12 +223,8 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                     
                     for leg in path.get("legs", []):
                         mode = leg.get("mode", "WALK")
-                        
-                        # 버스 타입 통합
-                        if "BUS" in mode: 
-                            mode = "BUS"
-                        elif mode == "TRAIN": 
-                            mode = "SUBWAY"
+                        if "BUS" in mode: mode = "BUS"
+                        elif mode == "TRAIN": mode = "SUBWAY"
                             
                         section_time = leg.get("sectionTime", 0) // 60
                         start_name = leg.get("start", {}).get("name", "출발")
@@ -227,15 +252,8 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                                     s_lat, s_lon = pass_stops[0].get("lat", s_lat), pass_stops[0].get("lon", s_lon)
                             
                             if mode == "BUS" and s_lat and s_lon:
-                                cache_key = f"{s_lat}_{s_lon}"
-                                if cache_key not in tago_cache:
-                                    city_code, tago_node_id = await get_tago_node_info(float(s_lat), float(s_lon))
-                                    if tago_node_id:
-                                        tago_cache[cache_key] = await fetch_tago_bus_arrivals(tago_node_id, city_code)
-                                    else:
-                                        tago_cache[cache_key] = {}
-                                        
-                                real_time_data = tago_cache[cache_key]
+                                cache_key = f"{str(s_lat)}_{str(s_lon)}"
+                                real_time_data = tago_cache.get(cache_key, {})
                                 
                                 for r_name in route_names:
                                     times = []
