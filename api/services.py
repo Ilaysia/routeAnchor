@@ -18,45 +18,53 @@ SEOUL_SUBWAY_API_KEY = os.environ.get("SEOUL_SUBWAY_API_KEY")
 # =====================================================================
 # 🌟 [수정] 서울/수도권 지하철 실시간 도착 정보 조회 (중복 제거 및 로직 통합)
 # =====================================================================
+# =====================================================================
+# 🌟 [수정] 서울/수도권 지하철 실시간 도착 정보 조회 (NoneType 방어 및 호선 매칭 강화)
+# =====================================================================
 async def fetch_seoul_subway_arrivals(station_name: str, target_line: str) -> list:
     if not SEOUL_SUBWAY_API_KEY or SEOUL_SUBWAY_API_KEY == "sample":
         print("경고: 서울 지하철 API 키가 등록되지 않아 'sample' 키로 작동 중입니다.")
         
-    clean_name = re.split(r'역|\(', station_name)[0].strip()
+    # 마침표(.)나 가운뎃점(·)이 포함된 부역명까지 깔끔하게 잘라냅니다.
+    clean_name = re.split(r'역|\(|\.|·', station_name)[0].strip()
     encoded_name = urllib.parse.quote(clean_name)
-    url = f"http://swopenapi.seoul.go.kr/api/subway/{SEOUL_SUBWAY_API_KEY}/json/realtimeStationArrival/0/10/{encoded_name}"
     
-    # 🌟 [추가] 어떤 역, 어떤 호선을 요청하는지 확인
-    print(f"🚇 [지하철 요청] 역: {clean_name}, 호선: {target_line}") 
+    url = f"http://swopenapi.seoul.go.kr/api/subway/{SEOUL_SUBWAY_API_KEY}/json/realtimeStationArrival/0/10/{encoded_name}"
     
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=3.0) as response:
                 if response.status == 200:
                     data = await response.json()
-                    # 🌟 [추가] 공공데이터 서버가 도대체 뭐라고 답변했는지 확인!
-                    print(f"🚇 [지하철 응답] {data}") 
-                    
                     times = []
                     
                     for item in data.get("realtimeArrivalList", []):
-                        subway_line_name = item.get("subwayNm", "").replace(" ", "")
+                        # 1. API가 subwayNm을 null(None)로 주는 경우를 완벽 방어
+                        raw_subway_nm = item.get("subwayNm")
+                        subway_line_name = str(raw_subway_nm).replace(" ", "") if raw_subway_nm else ""
                         clean_target_line = target_line.replace(" ", "")
                         
-                        # "수도권2호선" vs "2호선", "분당선" vs "수인분당선" 상호 매칭 보완
-                        if subway_line_name in clean_target_line or clean_target_line in subway_line_name:
-                            # arvlMsg2 예: "5분 후", "전역 진입", "방학 도착" 등 실시간 정보 추출
+                        # 2. 호선 매칭 로직 (수인분당선 등 예외 처리 및 None 값 수용)
+                        is_match = False
+                        if not subway_line_name: 
+                            # API가 호선명을 아예 안 줬다면, 검색된 역의 결과를 일단 수용함
+                            is_match = True
+                        elif subway_line_name in clean_target_line or clean_target_line in subway_line_name:
+                            is_match = True
+                        elif "분당" in clean_target_line and "분당" in subway_line_name:
+                            is_match = True
+                            
+                        # 3. 매칭된 경우 진짜 실시간 정보를 times 배열에 담음
+                        if is_match:
                             msg = item.get("arvlMsg2")
                             if msg:
                                 times.append(msg)
-                            
+                                
                     return list(dict.fromkeys(times))[:2]
     except Exception as e: 
-        # Vercel 환경에서 예외를 확실하게 볼 수 있도록 traceback 출력 추가
         print(f"지하철 실시간 에러 상세: {traceback.format_exc()}")
         
     return []
-
 # =====================================================================
 # [Step 1] TAGO 버스 지역코드 동적 획득
 # =====================================================================
