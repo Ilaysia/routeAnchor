@@ -16,6 +16,8 @@ TMAP_API_KEY = os.environ.get("TMAP_API_KEY")
 TAGO_API_KEY = os.environ.get("TAGO_API_KEY")
 SEOUL_SUBWAY_API_KEY = os.environ.get("SEOUL_SUBWAY_API_KEY")
 
+# services.py 내부 함수 수정
+
 # =====================================================================
 # 서울/수도권 지하철 실시간 도착 정보 조회
 # =====================================================================
@@ -36,18 +38,28 @@ async def fetch_seoul_subway_arrivals(station_name: str, target_line: str) -> li
                     times = []
                     
                     for item in data.get("realtimeArrivalList", []):
-                        raw_subway_nm = item.get("subwayNm")
-                        subway_line_name = str(raw_subway_nm).replace(" ", "") if raw_subway_nm else ""
-                        clean_target_line = target_line.replace(" ", "")
+                        # 서울 API의 호선 이름 추출 (공백 제거)
+                        subway_nm = str(item.get("subwayNm", "")).replace(" ", "")
+                        t_line = target_line.replace("수도권", "").replace(" ", "")
                         
                         is_match = False
-                        if not subway_line_name: 
-                            is_match = True
-                        elif subway_line_name in clean_target_line or clean_target_line in subway_line_name:
-                            is_match = True
-                        elif "분당" in clean_target_line and "분당" in subway_line_name:
-                            is_match = True
-                            
+                        
+                        # 🌟 [수정 포인트] 지하철 이름이 확실히 존재할 때만 엄격하게 매칭합니다.
+                        if subway_nm:
+                            # 1. 완벽히 일치하거나 '선'을 제외하고 일치할 때
+                            if t_line == subway_nm or t_line.replace("선", "") == subway_nm.replace("선", ""):
+                                is_match = True
+                            # 2. 수인분당선 예외 처리 (신분당선과 혼동 방지)
+                            elif ("수인" in t_line or "분당" in t_line) and "신분당" not in t_line:
+                                if ("수인" in subway_nm or "분당" in subway_nm) and "신분당" not in subway_nm:
+                                    is_match = True
+                            # 3. 신분당선 처리
+                            elif "신분당" in t_line and "신분당" in subway_nm:
+                                is_match = True
+                            # 4. 그 외 "1호선"이 "수도권1호선"에 포함되는 등 범용 매칭
+                            elif t_line in subway_nm or subway_nm in t_line:
+                                is_match = True
+                                
                         if is_match:
                             msg = item.get("arvlMsg2")
                             if msg:
@@ -57,7 +69,6 @@ async def fetch_seoul_subway_arrivals(station_name: str, target_line: str) -> li
     except Exception: 
         pass
     return []
-
 # =====================================================================
 # [Step 1] 주변 정류장 3개 정보 가져오기
 # =====================================================================
