@@ -16,6 +16,8 @@ TMAP_API_KEY = os.environ.get("TMAP_API_KEY")
 TAGO_API_KEY = os.environ.get("TAGO_API_KEY")
 SEOUL_SUBWAY_API_KEY = os.environ.get("SEOUL_SUBWAY_API_KEY")
 
+# services.py 내부 함수 수정
+
 # =====================================================================
 # 서울/수도권 지하철 실시간 도착 정보 조회
 # =====================================================================
@@ -35,23 +37,26 @@ async def fetch_seoul_subway_arrivals(station_name: str, target_line: str) -> li
                     data = await response.json()
                     times = []
                     
-                    # 🌟 [안전장치] 서울 API가 빈 데이터를 내려줄 때의 에러 방지
-                    realtime_list = data.get("realtimeArrivalList")
-                    if not realtime_list: return []
-                    
-                    for item in realtime_list:
+                    for item in data.get("realtimeArrivalList", []):
+                        # 서울 API의 호선 이름 추출 (공백 제거)
                         subway_nm = str(item.get("subwayNm", "")).replace(" ", "")
                         t_line = target_line.replace("수도권", "").replace(" ", "")
                         
                         is_match = False
+                        
+                        # 🌟 [수정 포인트] 지하철 이름이 확실히 존재할 때만 엄격하게 매칭합니다.
                         if subway_nm:
+                            # 1. 완벽히 일치하거나 '선'을 제외하고 일치할 때
                             if t_line == subway_nm or t_line.replace("선", "") == subway_nm.replace("선", ""):
                                 is_match = True
+                            # 2. 수인분당선 예외 처리 (신분당선과 혼동 방지)
                             elif ("수인" in t_line or "분당" in t_line) and "신분당" not in t_line:
                                 if ("수인" in subway_nm or "분당" in subway_nm) and "신분당" not in subway_nm:
                                     is_match = True
+                            # 3. 신분당선 처리
                             elif "신분당" in t_line and "신분당" in subway_nm:
                                 is_match = True
+                            # 4. 그 외 "1호선"이 "수도권1호선"에 포함되는 등 범용 매칭
                             elif t_line in subway_nm or subway_nm in t_line:
                                 is_match = True
                                 
@@ -64,9 +69,8 @@ async def fetch_seoul_subway_arrivals(station_name: str, target_line: str) -> li
     except Exception: 
         pass
     return []
-
 # =====================================================================
-# [Step 1] 주변 정류장 정보 가져오기 (경기도 커버리지 확대)
+# [Step 1] 주변 정류장 3개 정보 가져오기
 # =====================================================================
 async def get_tago_nodes(lat: float, lon: float, session: aiohttp.ClientSession) -> list[tuple[str, str]]:
     if not TAGO_API_KEY: return []
@@ -77,26 +81,24 @@ async def get_tago_nodes(lat: float, lon: float, session: aiohttp.ClientSession)
         "gpsLati": str(lat),
         "gpsLong": str(lon),
         "_type": "json",
-        "numOfRows": "10",  # 🌟 [수정] 경기도 마을버스 등 탐색 확률을 높이기 위해 반경 정류장 탐색 개수 증가
+        "numOfRows": "3",  
         "pageNo": "1"
     }
+    headers = {"User-Agent": "Mozilla/5.0"}
     
     try:
-        async with session.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=3.5) as response:
+        async with session.get(url, params=params, headers=headers, timeout=3.5) as response:
             if response.status != 200: return []
-            data = await response.json()
+            try:
+                data = await response.json()
+            except Exception:
+                return []
             
-            # 🌟 [안전장치] 공공데이터 포털의 고질적인 None 응답 에러 완벽 차단
-            body = data.get("response", {}).get("body")
-            if not body: return []
-            items = body.get("items")
-            if not items: return []
-            
-            item_list = items.get("item", [])
-            if isinstance(item_list, dict): item_list = [item_list]
+            items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
+            if isinstance(items, dict): items = [items]
             
             nodes = []
-            for it in item_list:
+            for it in items:
                 city = str(it.get("citycode", ""))
                 node = str(it.get("nodeid", ""))
                 if city and node: nodes.append((city, node))
@@ -105,7 +107,7 @@ async def get_tago_nodes(lat: float, lon: float, session: aiohttp.ClientSession)
         return []
 
 # =====================================================================
-# [Step 2] 버스 도착 정보 가져오기
+# [Step 2] 버스 도착 정보 가져오기 
 # =====================================================================
 async def fetch_tago_bus_arrivals(node_id: str, city_code: str, session: aiohttp.ClientSession) -> dict:
     if not TAGO_API_KEY: return {}
@@ -116,25 +118,24 @@ async def fetch_tago_bus_arrivals(node_id: str, city_code: str, session: aiohttp
         "cityCode": str(city_code),
         "nodeId": str(node_id),
         "_type": "json",
-        "numOfRows": "30",
+        "numOfRows": "20",
         "pageNo": "1"
     }
+    headers = {"User-Agent": "Mozilla/5.0"}
     
     try:
-        async with session.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=3.5) as response: 
+        async with session.get(url, params=params, headers=headers, timeout=3.5) as response: 
             if response.status != 200: return {}
-            data = await response.json()
+            try:
+                data = await response.json()
+            except Exception:
+                return {}
             
-            body = data.get("response", {}).get("body")
-            if not body: return {}
-            items = body.get("items")
-            if not items: return {}
-            
-            item_list = items.get("item", [])
-            if isinstance(item_list, dict): item_list = [item_list]
+            items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
+            if isinstance(items, dict): items = [items]
             
             bus_info = {}
-            for item in item_list:
+            for item in items:
                 route_no = str(item.get("routeno"))
                 arr_time_min = item.get("arrtime", 0) // 60
                 if route_no not in bus_info: bus_info[route_no] = []
@@ -149,7 +150,7 @@ async def fetch_tago_bus_arrivals(node_id: str, city_code: str, session: aiohttp
         return {}
 
 # =====================================================================
-# [Step 3] 병렬 처리 + 신호등 제어
+# [Step 3] 병렬 처리 + 신호등 제어 (DDoS 오인 방지)
 # =====================================================================
 async def fetch_and_cache(lat_str: str, lon_str: str, session: aiohttp.ClientSession, sem: asyncio.Semaphore):
     async with sem:
@@ -171,11 +172,17 @@ async def fetch_and_cache(lat_str: str, lon_str: str, session: aiohttp.ClientSes
                         merged_bus_info[bus_no] = times
                     else:
                         all_times = merged_bus_info[bus_no] + times
-                        merged_bus_info[bus_no] = list(dict.fromkeys(all_times))[:2]
+                        seen = set()
+                        unique_times = []
+                        for t in all_times:
+                            if t not in seen:
+                                seen.add(t)
+                                unique_times.append(t)
+                        merged_bus_info[bus_no] = unique_times[:2]
     return f"{lat_str}_{lon_str}", merged_bus_info
 
 # =====================================================================
-# TMAP 지오코딩 및 길찾기 로직
+# TMAP 지오코딩 및 길찾기 핵심 로직
 # =====================================================================
 async def get_coords_from_tmap(place_name: str) -> tuple[float, float]:
     url = "https://apis.openapi.sk.com/tmap/pois"
@@ -190,6 +197,7 @@ async def get_coords_from_tmap(place_name: str) -> tuple[float, float]:
                     return float(poi["noorLon"]), float(poi["noorLat"])
     raise HTTPException(status_code=400, detail=f"'{place_name}' 장소를 찾을 수 없습니다.")
 
+# 🌟 [변경] is_first_segment 파라미터 추가
 async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt_type: str, search_date: str = None, is_first_segment: bool = False) -> list[RouteResponse]:
     if start.latitude == end.latitude and start.longitude == end.longitude:
         return [RouteResponse(totalTimeMin=0, totalFareWon=0, totalWalkDistanceMeter=0, segments=[RouteSegment(segmentType="WALK", instruction="도보 이동", durationMin=0, startLocationName=start.name, endLocationName=end.name, pathCoordinates=[], transitOptions=[])])]
@@ -224,6 +232,7 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
 
                 unique_bus_coords = set()
                 
+                # 첫 번째 구간일 때만 버스 정류장 좌표를 추출합니다.
                 if is_first_segment:
                     for path in itineraries[:3]:
                         for leg in path.get("legs", []):
@@ -238,6 +247,7 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                                     unique_bus_coords.add((str(s_lat), str(s_lon)))
 
                 tago_cache = {}
+                # 🌟 [트래픽 감소] 첫 번째 구간(is_first_segment)일 때만 실시간 버스 정보를 호출합니다.
                 if is_first_segment and unique_bus_coords:
                     sem = asyncio.Semaphore(3)
                     tasks = [fetch_and_cache(lat, lon, session, sem) for lat, lon in unique_bus_coords]
@@ -285,29 +295,29 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                                     s_lat, s_lon = pass_stops[0].get("lat", s_lat), pass_stops[0].get("lon", s_lon)
                             
                             if mode == "BUS" and s_lat and s_lon:
+                                # 🌟 첫 번째 구간 + 상위 3개 경로에만 실시간 데이터를 넣습니다.
                                 if is_first_segment and idx < 3:
                                     cache_key = f"{str(s_lat)}_{str(s_lon)}"
                                     real_time_data = tago_cache.get(cache_key, {})
                                     
                                     for r_name in route_names:
                                         times = []
-                                        # 🌟 [수정] 영문/숫자만 뽑아내서 부분 매칭(마을 2-1 -> 21로 매칭성공)
-                                        r_clean = re.sub(r'[^a-zA-Z0-9]', '', r_name)
+                                        r_clean = re.sub(r'[^a-zA-Z0-9\-]', '', r_name)
                                         for tago_bus_no, tago_times in real_time_data.items():
-                                            tago_clean = re.sub(r'[^a-zA-Z0-9]', '', tago_bus_no)
-                                            if r_clean and tago_clean and (r_clean in tago_clean or tago_clean in r_clean):
+                                            tago_clean = re.sub(r'[^a-zA-Z0-9\-]', '', tago_bus_no)
+                                            if r_clean and tago_clean and r_clean == tago_clean:
                                                 times = tago_times
                                                 break
                                                 
-                                        # 🌟 [수정] 정보 없음 -> 시간표 참조로 원상복구
-                                        arr1 = times[0] if len(times) > 0 else "시간표 참조"
+                                        arr1 = times[0] if len(times) > 0 else "정보 없음"
                                         arr2 = times[1] if len(times) > 1 else None
                                         transit_options.append(TransitOption(routeName=r_name, arrivalTime1=arr1, arrivalTime2=arr2))
                                 else:
+                                    # 첫 번째 구간이 아니거나 하위 경로면 무조건 시간표 참조
                                     for r_name in route_names:
                                         transit_options.append(TransitOption(routeName=r_name, arrivalTime1="시간표 참조", arrivalTime2=None))
                             
-                            elif mode == "SUBWAY" or mode == "TRAIN":
+                            elif mode == "SUBWAY":
                                 if is_first_segment and idx < 3:
                                     for r_name in route_names:
                                         times = await fetch_seoul_subway_arrivals(start_name, r_name)
@@ -348,9 +358,13 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                 traceback.print_exc()
                 raise HTTPException(status_code=500, detail=f"파싱 오류: {str(e)}")
 
+## =====================================================================
+# 🌟 [핵심 변경] 모든 지오코딩과 경로 탐색 병렬 처리 및 조합(itertools) 최적화
+# =====================================================================
 async def process_optimized_route(request: RouteRequest):
     all_points = [request.startPoint] + request.anchorPoints + [request.endPoint]
     
+    # 1. 지오코딩 병렬 처리 (좌표가 없는 장소 이름들 한 번에 변환)
     async def resolve_coords(point):
         if point.latitude == 0.0 and point.longitude == 0.0:
             lon, lat = await get_coords_from_tmap(point.name)
@@ -359,17 +373,29 @@ async def process_optimized_route(request: RouteRequest):
     resolve_tasks = [resolve_coords(pt) for pt in all_points]
     await asyncio.gather(*resolve_tasks)
 
+    # 2. 경로 탐색 병렬 처리 (구간별로 한 번에 API 호출)
     segment_tasks = []
     for i in range(len(all_points) - 1):
-        is_first = (i == 0)
+        is_first = (i == 0) # 첫 번째 구간만 실시간 정보 플래그 True
         task = fetch_segments_from_tmap(
-            start=all_points[i], end=all_points[i+1], 
-            opt_type=request.optimizationType.value, search_date=request.searchDate, is_first_segment=is_first
+            start=all_points[i], 
+            end=all_points[i+1], 
+            opt_type=request.optimizationType.value, 
+            search_date=request.searchDate,
+            is_first_segment=is_first
         )
         segment_tasks.append(task)
 
+    # Vercel 타임아웃 방어막: 여기서 모든 구간 데이터를 한 번에 가져옵니다.
     legs_alternatives = await asyncio.gather(*segment_tasks)
+
+    # 🌟 [치명적 에러 해결 포인트: 데이터 다이어트]
+    # 각 구간별로 TMAP이 내려준 10개의 경로를 모두 곱하면 10^N 승으로 메모리가 터집니다.
+    # 이미 fetch_segments_from_tmap 안에서 정렬되어 있으므로, 상위 3개씩만 잘라내어 조합합니다.
     optimized_legs = [legs[:3] for legs in legs_alternatives]
+
+    # 3. 경로 조합 및 정렬 로직
+    # 최대 3 * 3 * 3... 수준으로 연산량이 극적으로 감소하여 서버 다운이 방지됩니다.
     all_combinations = list(itertools.product(*optimized_legs))
 
     if request.optimizationType.value == "MIN_TIME": all_combinations.sort(key=lambda combo: sum(r.totalTimeMin for r in combo))
@@ -377,7 +403,7 @@ async def process_optimized_route(request: RouteRequest):
     elif request.optimizationType.value == "MIN_WALK": all_combinations.sort(key=lambda combo: sum(r.totalWalkDistanceMeter for r in combo))
 
     final_routes = []
-    for combo in all_combinations[:10]:
+    for combo in all_combinations[:10]: # 최종적으로 유저에게 보여줄 상위 10개만 선정
         total_time, total_fare, total_walk, merged_segments = 0, 0, 0, []
         for idx, route in enumerate(combo):
             total_time += route.totalTimeMin
@@ -385,6 +411,7 @@ async def process_optimized_route(request: RouteRequest):
             total_walk += route.totalWalkDistanceMeter
             merged_segments.extend(route.segments)
             
+            # 다음 구간으로 넘어갈 때 '경유지 대기(WAIT)' 세그먼트를 추가합니다.
             if idx < len(combo) - 1:
                 wait_point = all_points[idx + 1]
                 merged_segments.append(RouteSegment(
