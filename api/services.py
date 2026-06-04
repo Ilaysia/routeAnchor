@@ -16,7 +16,7 @@ TMAP_API_KEY = os.environ.get("TMAP_API_KEY")
 TAGO_API_KEY = os.environ.get("TAGO_API_KEY")
 SEOUL_SUBWAY_API_KEY = os.environ.get("SEOUL_SUBWAY_API_KEY")
 
-# 🌟 [해결 1] 서울 지하철 고유 ID를 실제 호선 이름으로 변환하는 사전 추가
+# 서울 지하철 고유 ID 맵핑 사전
 SUBWAY_ID_MAP = {
     "1001": "1호선", "1002": "2호선", "1003": "3호선", "1004": "4호선",
     "1005": "5호선", "1006": "6호선", "1007": "7호선", "1008": "8호선",
@@ -43,11 +43,9 @@ async def fetch_seoul_subway_all(station_name: str, session: aiohttp.ClientSessi
                 realtime_list = data.get("realtimeArrivalList", [])
                 res = {}
                 for item in realtime_list:
-                    # 🌟 [해결 1 적용] 이름 대신 ID를 가져와서 변환 (서울 API 응답 버그 대처)
                     subway_id = str(item.get("subwayId", ""))
                     subway_nm = SUBWAY_ID_MAP.get(subway_id, "")
-                    
-                    if not subway_nm: # 만약 사전에 없는 새로운 호선이라면 대체 시도
+                    if not subway_nm: 
                         subway_nm = str(item.get("subwayNm", "")).replace(" ", "")
                         
                     msg = item.get("arvlMsg2")
@@ -67,8 +65,8 @@ async def get_tago_nodes(lat: float, lon: float, session: aiohttp.ClientSession)
     if not TAGO_API_KEY: return []
     key = TAGO_API_KEY.strip()
     
-    # 🌟 [해결 2] 이중 인코딩 에러 방지를 위해 params를 쓰지 않고 URL에 직접 조립
-    url = f"http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList?serviceKey={key}&gpsLati={lat}&gpsLong={lon}&_type=json&numOfRows=5&pageNo=1"
+    # 🌟 [수정] 마을버스 노드가 뒤로 밀리는 현상 방지 위해 numOfRows를 10으로 확장
+    url = f"http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList?serviceKey={key}&gpsLati={lat}&gpsLong={lon}&_type=json&numOfRows=10&pageNo=1"
     
     try:
         async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=3.5) as response:
@@ -83,7 +81,6 @@ async def fetch_tago_bus_arrivals(node_id: str, city_code: str, session: aiohttp
     if not TAGO_API_KEY: return {}
     key = TAGO_API_KEY.strip()
     
-    # 🌟 [해결 2] 이중 인코딩 에러 방지
     url = f"http://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList?serviceKey={key}&cityCode={city_code}&nodeId={node_id}&_type=json&numOfRows=20&pageNo=1"
     
     try:
@@ -204,10 +201,12 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                             route_names = [r.strip() for r in route_name.split(",")]
                             
                             s_lat, s_lon = leg.get("start", {}).get("lat"), leg.get("start", {}).get("lon")
-                            if not s_lat or not s_lon:
-                                pass_stops = leg.get("passStopList", {}).get("stationList", [])
-                                if pass_stops:
-                                    s_lat, s_lon = pass_stops[0].get("lat", s_lat), pass_stops[0].get("lon", s_lon)
+                            
+                            # 🌟 [수정] 정확도 100% 보장: TMAP의 모호한 출발지가 아닌 '첫 번째 통과 정류장' 좌표 획득
+                            pass_stops = leg.get("passStopList", {}).get("stationList", [])
+                            if pass_stops:
+                                s_lat = pass_stops[0].get("lat", s_lat)
+                                s_lon = pass_stops[0].get("lon", s_lon)
                             
                             for r_name in route_names:
                                 transit_options.append(TransitOption(routeName=r_name, arrivalTime1="시간표 참조", arrivalTime2=None))
@@ -219,6 +218,7 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                             ls = pass_shape if isinstance(pass_shape, str) else (pass_shape.get("linestring", "") if pass_shape else "")
                             path_coords.extend(parse_linestring(ls))
                             
+                            # 정확하게 획득한 정류장 좌표를 경로 맨 앞에 삽입 (타겟팅 용도)
                             if s_lat and s_lon and not path_coords:
                                 path_coords.insert(0, Coordinate(latitude=float(s_lat), longitude=float(s_lon)))
                             elif s_lat and s_lon:
@@ -307,13 +307,12 @@ async def process_optimized_route(request: RouteRequest):
     subway_data = {}
 
     async with aiohttp.ClientSession() as session:
-        sem = asyncio.Semaphore(5)
+        sem = asyncio.Semaphore(10) # 속도 향상을 위해 동시 요청 10개 허용
         tasks = [fetch_and_cache(lat, lon, session, sem) for lat, lon in unique_bus_coords]
         tasks += [fetch_seoul_subway_all(name, session) for name in unique_subways]
         
         if tasks:
             try:
-                # 🌟 [해결 3] 넉넉한 7.5초 타임아웃 방어막 (Vercel 기본 10초 내 최대한 버팀)
                 results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=7.5)
                 for res in results:
                     if not isinstance(res, Exception):
@@ -342,10 +341,13 @@ async def process_optimized_route(request: RouteRequest):
                     real_time = tago_data.get(f"{lat}_{lon}", {})
                     
                     for opt in seg.transitOptions:
-                        r_clean = re.sub(r'[가-힣\s\(\)]', '', opt.routeName)
+                        # 🌟 [수정] 영문, 숫자, 하이픈(-) 외 전부 제거 및 앞의 0 제거 (06-1 -> 6-1 대응 완벽)
+                        r_clean = re.sub(r'[^a-zA-Z0-9\-]', '', opt.routeName).lstrip('0')
                         for tago_bus_no, tago_times in real_time.items():
-                            tago_clean = re.sub(r'[가-힣\s\(\)]', '', tago_bus_no)
-                            if r_clean and tago_clean and (r_clean == tago_clean or r_clean in tago_clean or tago_clean in r_clean):
+                            tago_clean = re.sub(r'[^a-zA-Z0-9\-]', '', tago_bus_no).lstrip('0')
+                            
+                            # 완전히 똑같을 때만 데이터 주입 (오류 원천 차단)
+                            if r_clean and tago_clean and r_clean == tago_clean:
                                 opt.arrivalTime1 = tago_times[0] if len(tago_times) > 0 else "시간표 참조"
                                 opt.arrivalTime2 = tago_times[1] if len(tago_times) > 1 else None
                                 break
