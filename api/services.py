@@ -358,7 +358,9 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                 traceback.print_exc()
                 raise HTTPException(status_code=500, detail=f"파싱 오류: {str(e)}")
 
-# 🌟 [핵심 변경] 모든 지오코딩과 경로 탐색을 순차(for문)가 아닌 병렬(asyncio.gather)로 쏩니다.
+## =====================================================================
+# 🌟 [핵심 변경] 모든 지오코딩과 경로 탐색 병렬 처리 및 조합(itertools) 최적화
+# =====================================================================
 async def process_optimized_route(request: RouteRequest):
     all_points = [request.startPoint] + request.anchorPoints + [request.endPoint]
     
@@ -387,15 +389,21 @@ async def process_optimized_route(request: RouteRequest):
     # Vercel 타임아웃 방어막: 여기서 모든 구간 데이터를 한 번에 가져옵니다.
     legs_alternatives = await asyncio.gather(*segment_tasks)
 
-    # 3. 경로 조합 및 정렬 로직 (기존과 동일)
-    all_combinations = list(itertools.product(*legs_alternatives))
+    # 🌟 [치명적 에러 해결 포인트: 데이터 다이어트]
+    # 각 구간별로 TMAP이 내려준 10개의 경로를 모두 곱하면 10^N 승으로 메모리가 터집니다.
+    # 이미 fetch_segments_from_tmap 안에서 정렬되어 있으므로, 상위 3개씩만 잘라내어 조합합니다.
+    optimized_legs = [legs[:3] for legs in legs_alternatives]
+
+    # 3. 경로 조합 및 정렬 로직
+    # 최대 3 * 3 * 3... 수준으로 연산량이 극적으로 감소하여 서버 다운이 방지됩니다.
+    all_combinations = list(itertools.product(*optimized_legs))
 
     if request.optimizationType.value == "MIN_TIME": all_combinations.sort(key=lambda combo: sum(r.totalTimeMin for r in combo))
     elif request.optimizationType.value == "MIN_COST": all_combinations.sort(key=lambda combo: sum(r.totalFareWon for r in combo))
     elif request.optimizationType.value == "MIN_WALK": all_combinations.sort(key=lambda combo: sum(r.totalWalkDistanceMeter for r in combo))
 
     final_routes = []
-    for combo in all_combinations[:10]:
+    for combo in all_combinations[:10]: # 최종적으로 유저에게 보여줄 상위 10개만 선정
         total_time, total_fare, total_walk, merged_segments = 0, 0, 0, []
         for idx, route in enumerate(combo):
             total_time += route.totalTimeMin
@@ -403,6 +411,7 @@ async def process_optimized_route(request: RouteRequest):
             total_walk += route.totalWalkDistanceMeter
             merged_segments.extend(route.segments)
             
+            # 다음 구간으로 넘어갈 때 '경유지 대기(WAIT)' 세그먼트를 추가합니다.
             if idx < len(combo) - 1:
                 wait_point = all_points[idx + 1]
                 merged_segments.append(RouteSegment(
