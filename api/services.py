@@ -186,7 +186,8 @@ async def get_coords_from_tmap(place_name: str) -> tuple[float, float]:
                     return float(poi["noorLon"]), float(poi["noorLat"])
     raise HTTPException(status_code=400, detail=f"'{place_name}' 장소를 찾을 수 없습니다.")
 
-async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt_type: str, search_date: str = None) -> list[RouteResponse]:
+# 🌟 [변경] is_first_segment 파라미터 추가
+async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt_type: str, search_date: str = None, is_first_segment: bool = False) -> list[RouteResponse]:
     if start.latitude == end.latitude and start.longitude == end.longitude:
         return [RouteResponse(totalTimeMin=0, totalFareWon=0, totalWalkDistanceMeter=0, segments=[RouteSegment(segmentType="WALK", instruction="도보 이동", durationMin=0, startLocationName=start.name, endLocationName=end.name, pathCoordinates=[], transitOptions=[])])]
 
@@ -219,22 +220,25 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                     return coords
 
                 unique_bus_coords = set()
-                # 🌟 [트래픽 90% 감소 핵심] 상위 3개의 핵심 경로만 버스 정류장을 추출합니다!
-                for path in itineraries[:3]:
-                    for leg in path.get("legs", []):
-                        mode = leg.get("mode", "WALK")
-                        if "BUS" in mode:
-                            s_lat, s_lon = leg.get("start", {}).get("lat"), leg.get("start", {}).get("lon")
-                            if not leg.get("start", {}).get("stationId"):
-                                pass_stops = leg.get("passStopList", {}).get("stationList", [])
-                                if pass_stops:
-                                    s_lat, s_lon = pass_stops[0].get("lat", s_lat), pass_stops[0].get("lon", s_lon)
-                            if s_lat and s_lon:
-                                unique_bus_coords.add((str(s_lat), str(s_lon)))
+                
+                # 첫 번째 구간일 때만 버스 정류장 좌표를 추출합니다.
+                if is_first_segment:
+                    for path in itineraries[:3]:
+                        for leg in path.get("legs", []):
+                            mode = leg.get("mode", "WALK")
+                            if "BUS" in mode:
+                                s_lat, s_lon = leg.get("start", {}).get("lat"), leg.get("start", {}).get("lon")
+                                if not leg.get("start", {}).get("stationId"):
+                                    pass_stops = leg.get("passStopList", {}).get("stationList", [])
+                                    if pass_stops:
+                                        s_lat, s_lon = pass_stops[0].get("lat", s_lat), pass_stops[0].get("lon", s_lon)
+                                if s_lat and s_lon:
+                                    unique_bus_coords.add((str(s_lat), str(s_lon)))
 
                 tago_cache = {}
-                if unique_bus_coords:
-                    sem = asyncio.Semaphore(3) # 🌟 3개씩만 줄 세워서 천천히 호출 (DDoS 차단 완벽 방어)
+                # 🌟 [트래픽 감소] 첫 번째 구간(is_first_segment)일 때만 실시간 버스 정보를 호출합니다.
+                if is_first_segment and unique_bus_coords:
+                    sem = asyncio.Semaphore(3)
                     tasks = [fetch_and_cache(lat, lon, session, sem) for lat, lon in unique_bus_coords]
                     results = await asyncio.gather(*tasks, return_exceptions=True)
                     for res in results:
@@ -243,7 +247,6 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                             tago_cache[k] = v
 
                 parsed_routes = []
-                # 전체 10개 경로 파싱 (단, 실시간 조회는 상위 3개만)
                 for idx, path in enumerate(itineraries[:10]):
                     total_time = path.get("totalTime", 0) // 60
                     total_fare = path.get("fare", {}).get("regular", {}).get("totalFare", 0)
@@ -281,8 +284,8 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                                     s_lat, s_lon = pass_stops[0].get("lat", s_lat), pass_stops[0].get("lon", s_lon)
                             
                             if mode == "BUS" and s_lat and s_lon:
-                                # 🌟 상위 3개 경로만 우리가 구한 실시간 데이터를 넣어줍니다.
-                                if idx < 3:
+                                # 🌟 첫 번째 구간 + 상위 3개 경로에만 실시간 데이터를 넣습니다.
+                                if is_first_segment and idx < 3:
                                     cache_key = f"{str(s_lat)}_{str(s_lon)}"
                                     real_time_data = tago_cache.get(cache_key, {})
                                     
@@ -299,12 +302,12 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                                         arr2 = times[1] if len(times) > 1 else None
                                         transit_options.append(TransitOption(routeName=r_name, arrivalTime1=arr1, arrivalTime2=arr2))
                                 else:
-                                    # 하위 7개 경로는 트래픽 절약을 위해 무조건 시간표 참조
+                                    # 첫 번째 구간이 아니거나 하위 경로면 무조건 시간표 참조
                                     for r_name in route_names:
                                         transit_options.append(TransitOption(routeName=r_name, arrivalTime1="시간표 참조", arrivalTime2=None))
                             
                             elif mode == "SUBWAY":
-                                if idx < 3:
+                                if is_first_segment and idx < 3:
                                     for r_name in route_names:
                                         times = await fetch_seoul_subway_arrivals(start_name, r_name)
                                         arr1 = times[0] if len(times) > 0 else "시간표 참조"
@@ -344,18 +347,36 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                 traceback.print_exc()
                 raise HTTPException(status_code=500, detail=f"파싱 오류: {str(e)}")
 
+# 🌟 [핵심 변경] 모든 지오코딩과 경로 탐색을 순차(for문)가 아닌 병렬(asyncio.gather)로 쏩니다.
 async def process_optimized_route(request: RouteRequest):
     all_points = [request.startPoint] + request.anchorPoints + [request.endPoint]
-    for point in all_points:
+    
+    # 1. 지오코딩 병렬 처리 (좌표가 없는 장소 이름들 한 번에 변환)
+    async def resolve_coords(point):
         if point.latitude == 0.0 and point.longitude == 0.0:
             lon, lat = await get_coords_from_tmap(point.name)
             point.longitude, point.latitude = lon, lat
+            
+    resolve_tasks = [resolve_coords(pt) for pt in all_points]
+    await asyncio.gather(*resolve_tasks)
 
-    legs_alternatives = []
+    # 2. 경로 탐색 병렬 처리 (구간별로 한 번에 API 호출)
+    segment_tasks = []
     for i in range(len(all_points) - 1):
-        alts = await fetch_segments_from_tmap(start=all_points[i], end=all_points[i+1], opt_type=request.optimizationType.value, search_date=request.searchDate)
-        legs_alternatives.append(alts)
+        is_first = (i == 0) # 첫 번째 구간만 실시간 정보 플래그 True
+        task = fetch_segments_from_tmap(
+            start=all_points[i], 
+            end=all_points[i+1], 
+            opt_type=request.optimizationType.value, 
+            search_date=request.searchDate,
+            is_first_segment=is_first
+        )
+        segment_tasks.append(task)
 
+    # Vercel 타임아웃 방어막: 여기서 모든 구간 데이터를 한 번에 가져옵니다.
+    legs_alternatives = await asyncio.gather(*segment_tasks)
+
+    # 3. 경로 조합 및 정렬 로직 (기존과 동일)
     all_combinations = list(itertools.product(*legs_alternatives))
 
     if request.optimizationType.value == "MIN_TIME": all_combinations.sort(key=lambda combo: sum(r.totalTimeMin for r in combo))
@@ -370,9 +391,15 @@ async def process_optimized_route(request: RouteRequest):
             total_fare += route.totalFareWon
             total_walk += route.totalWalkDistanceMeter
             merged_segments.extend(route.segments)
+            
             if idx < len(combo) - 1:
                 wait_point = all_points[idx + 1]
-                merged_segments.append(RouteSegment(segmentType="WAIT", instruction=f"[{wait_point.name}] 경유지", durationMin=5, startLocationName=wait_point.name, endLocationName=wait_point.name, pathCoordinates=[Coordinate(latitude=wait_point.latitude, longitude=wait_point.longitude)], transitOptions=[]))
+                merged_segments.append(RouteSegment(
+                    segmentType="WAIT", instruction=f"[{wait_point.name}] 경유지", durationMin=5, 
+                    startLocationName=wait_point.name, endLocationName=wait_point.name, 
+                    pathCoordinates=[Coordinate(latitude=wait_point.latitude, longitude=wait_point.longitude)], 
+                    transitOptions=[]
+                ))
                 total_time += 5
 
         final_routes.append(RouteResponse(
@@ -380,4 +407,5 @@ async def process_optimized_route(request: RouteRequest):
             startCoordinate=Coordinate(latitude=all_points[0].latitude, longitude=all_points[0].longitude),
             endCoordinate=Coordinate(latitude=all_points[-1].latitude, longitude=all_points[-1].longitude)
         ))
+        
     return {"routes": final_routes}
