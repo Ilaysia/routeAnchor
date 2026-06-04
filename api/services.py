@@ -16,8 +16,17 @@ TMAP_API_KEY = os.environ.get("TMAP_API_KEY")
 TAGO_API_KEY = os.environ.get("TAGO_API_KEY")
 SEOUL_SUBWAY_API_KEY = os.environ.get("SEOUL_SUBWAY_API_KEY")
 
+# 🌟 [해결 1] 서울 지하철 고유 ID를 실제 호선 이름으로 변환하는 사전 추가
+SUBWAY_ID_MAP = {
+    "1001": "1호선", "1002": "2호선", "1003": "3호선", "1004": "4호선",
+    "1005": "5호선", "1006": "6호선", "1007": "7호선", "1008": "8호선",
+    "1009": "9호선", "1063": "경의중앙선", "1065": "공항철도", "1067": "경춘선",
+    "1075": "수인분당선", "1077": "신분당선", "1092": "우이신설선", "1093": "서해선",
+    "1081": "경강선", "1069": "인천1호선", "1071": "인천2호선", "1089": "신림선", "1032": "GTXA"
+}
+
 # =====================================================================
-# 🌟 [최적화 1] 지하철역 하나당 1번만 호출하여 전체 호선 시간표를 한 번에 캐싱
+# 서울/수도권 지하철 실시간 도착 정보 조회
 # =====================================================================
 async def fetch_seoul_subway_all(station_name: str, session: aiohttp.ClientSession) -> tuple:
     if not SEOUL_SUBWAY_API_KEY: return station_name, {}
@@ -28,33 +37,41 @@ async def fetch_seoul_subway_all(station_name: str, session: aiohttp.ClientSessi
     url = f"http://swopenapi.seoul.go.kr/api/subway/{subway_key}/json/realtimeStationArrival/0/15/{encoded_name}"
     
     try:
-        async with session.get(url, timeout=2.5) as response:
+        async with session.get(url, timeout=3.5) as response:
             if response.status == 200:
                 data = await response.json()
                 realtime_list = data.get("realtimeArrivalList", [])
                 res = {}
                 for item in realtime_list:
-                    subway_nm = str(item.get("subwayNm", "")).replace(" ", "")
+                    # 🌟 [해결 1 적용] 이름 대신 ID를 가져와서 변환 (서울 API 응답 버그 대처)
+                    subway_id = str(item.get("subwayId", ""))
+                    subway_nm = SUBWAY_ID_MAP.get(subway_id, "")
+                    
+                    if not subway_nm: # 만약 사전에 없는 새로운 호선이라면 대체 시도
+                        subway_nm = str(item.get("subwayNm", "")).replace(" ", "")
+                        
                     msg = item.get("arvlMsg2")
                     if subway_nm and msg:
                         if subway_nm not in res: res[subway_nm] = []
                         res[subway_nm].append(msg)
                 
-                # 중복 제거 및 상위 2개 시간만 유지
                 for k in res: res[k] = list(dict.fromkeys(res[k]))[:2]
                 return station_name, res
     except Exception: pass
     return station_name, {}
 
 # =====================================================================
-# 공공데이터(TAGO) 버스 정류장 및 실시간 정보 조회 (변경 없음)
+# 공공데이터(TAGO) 버스 정류장 및 실시간 정보 조회
 # =====================================================================
 async def get_tago_nodes(lat: float, lon: float, session: aiohttp.ClientSession) -> list:
     if not TAGO_API_KEY: return []
-    url = "http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList"
-    params = {"serviceKey": TAGO_API_KEY.strip(), "gpsLati": str(lat), "gpsLong": str(lon), "_type": "json", "numOfRows": "5", "pageNo": "1"}
+    key = TAGO_API_KEY.strip()
+    
+    # 🌟 [해결 2] 이중 인코딩 에러 방지를 위해 params를 쓰지 않고 URL에 직접 조립
+    url = f"http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList?serviceKey={key}&gpsLati={lat}&gpsLong={lon}&_type=json&numOfRows=5&pageNo=1"
+    
     try:
-        async with session.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=3.0) as response:
+        async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=3.5) as response:
             if response.status != 200: return []
             data = await response.json()
             items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
@@ -64,10 +81,13 @@ async def get_tago_nodes(lat: float, lon: float, session: aiohttp.ClientSession)
 
 async def fetch_tago_bus_arrivals(node_id: str, city_code: str, session: aiohttp.ClientSession) -> dict:
     if not TAGO_API_KEY: return {}
-    url = "http://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList"
-    params = {"serviceKey": TAGO_API_KEY.strip(), "cityCode": str(city_code), "nodeId": str(node_id), "_type": "json", "numOfRows": "20", "pageNo": "1"}
+    key = TAGO_API_KEY.strip()
+    
+    # 🌟 [해결 2] 이중 인코딩 에러 방지
+    url = f"http://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList?serviceKey={key}&cityCode={city_code}&nodeId={node_id}&_type=json&numOfRows=20&pageNo=1"
+    
     try:
-        async with session.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=3.0) as response: 
+        async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=3.5) as response: 
             if response.status != 200: return {}
             data = await response.json()
             items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
@@ -108,7 +128,7 @@ async def fetch_and_cache(lat_str: str, lon_str: str, session: aiohttp.ClientSes
     return f"{lat_str}_{lon_str}", merged_bus_info
 
 # =====================================================================
-# 🌟 [최적화 2] TMAP 로직에서 실시간 조회를 완전히 제거. '순수 탐색'만 진행.
+# TMAP 로직 (실시간 조회를 뺀 초고속 순수 탐색)
 # =====================================================================
 async def get_coords_from_tmap(place_name: str) -> tuple[float, float]:
     url = "https://apis.openapi.sk.com/tmap/pois"
@@ -189,7 +209,6 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                                 if pass_stops:
                                     s_lat, s_lon = pass_stops[0].get("lat", s_lat), pass_stops[0].get("lon", s_lon)
                             
-                            # 🌟 [핵심] TMAP 탐색 중에는 무조건 '시간표 참조'로 세팅 (시간 단축)
                             for r_name in route_names:
                                 transit_options.append(TransitOption(routeName=r_name, arrivalTime1="시간표 참조", arrivalTime2=None))
                             
@@ -200,7 +219,6 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                             ls = pass_shape if isinstance(pass_shape, str) else (pass_shape.get("linestring", "") if pass_shape else "")
                             path_coords.extend(parse_linestring(ls))
                             
-                            # 실시간 타겟팅을 위해 정확한 좌표를 맨 앞에 삽입
                             if s_lat and s_lon and not path_coords:
                                 path_coords.insert(0, Coordinate(latitude=float(s_lat), longitude=float(s_lon)))
                             elif s_lat and s_lon:
@@ -218,14 +236,12 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"파싱 오류: {str(e)}")
 
-
 # =====================================================================
-# 🌟 [최적화 3] 메인 프로세스: 경로 선발 ➔ 타겟팅 실시간 데이터 주입
+# 메인 프로세스: 경로 선발 ➔ 타겟팅 실시간 데이터 주입
 # =====================================================================
 async def process_optimized_route(request: RouteRequest):
     all_points = [request.startPoint] + request.anchorPoints + [request.endPoint]
     
-    # 1. 지오코딩 병렬 처리
     async def resolve_coords(point):
         if point.latitude == 0.0 and point.longitude == 0.0:
             lon, lat = await get_coords_from_tmap(point.name)
@@ -233,7 +249,6 @@ async def process_optimized_route(request: RouteRequest):
             
     await asyncio.gather(*[resolve_coords(pt) for pt in all_points])
 
-    # 2. 실시간 조회 없이 초고속 TMAP 경로 탐색
     segment_tasks = []
     for i in range(len(all_points) - 1):
         task = fetch_segments_from_tmap(
@@ -250,9 +265,8 @@ async def process_optimized_route(request: RouteRequest):
     elif request.optimizationType.value == "MIN_COST": all_combinations.sort(key=lambda combo: sum(r.totalFareWon for r in combo))
     elif request.optimizationType.value == "MIN_WALK": all_combinations.sort(key=lambda combo: sum(r.totalWalkDistanceMeter for r in combo))
 
-    # 3. 상위 5개의 최종 경로만 확정
     final_routes = []
-    for combo in all_combinations[:5]: # 🌟 무조건 상위 5개만!
+    for combo in all_combinations[:5]: 
         total_time, total_fare, total_walk, merged_segments = 0, 0, 0, []
         for idx, route in enumerate(combo):
             total_time += route.totalTimeMin
@@ -275,19 +289,16 @@ async def process_optimized_route(request: RouteRequest):
             endCoordinate=Coordinate(latitude=all_points[-1].latitude, longitude=all_points[-1].longitude)
         ))
 
-    # =========================================================
-    # 🌟 [최적화 핵심] 확정된 5개 경로의 '첫 번째 탑승 정류장'만 추출하여 타겟팅 조회
-    # =========================================================
+    # 타겟팅 조회
     unique_bus_coords = set()
     unique_subways = set()
     
-    # 첫 번째 대중교통 탑승 위치(도보 제외)만 수집
     for r in final_routes:
         for seg in r.segments:
             if seg.segmentType == "BUS":
                 if seg.pathCoordinates:
                     unique_bus_coords.add((str(seg.pathCoordinates[0].latitude), str(seg.pathCoordinates[0].longitude)))
-                break # 첫 탑승구간만 찾으면 다음 경로로
+                break 
             elif seg.segmentType in ["SUBWAY", "TRAIN"]:
                 unique_subways.add(seg.startLocationName)
                 break
@@ -295,7 +306,6 @@ async def process_optimized_route(request: RouteRequest):
     tago_data = {}
     subway_data = {}
 
-    # 수집된 1~5개의 정류장만 병렬 조회 (Vercel 과부하 원천 차단)
     async with aiohttp.ClientSession() as session:
         sem = asyncio.Semaphore(5)
         tasks = [fetch_and_cache(lat, lon, session, sem) for lat, lon in unique_bus_coords]
@@ -303,16 +313,17 @@ async def process_optimized_route(request: RouteRequest):
         
         if tasks:
             try:
-                results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=4.0)
+                # 🌟 [해결 3] 넉넉한 7.5초 타임아웃 방어막 (Vercel 기본 10초 내 최대한 버팀)
+                results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=7.5)
                 for res in results:
                     if not isinstance(res, Exception):
                         k, v = res
                         if "_" in k: tago_data[k] = v
                         else: subway_data[k] = v
             except asyncio.TimeoutError:
-                pass # 공공데이터 서버 장애 시 안전하게 시간표 상태로 통과
+                pass 
 
-    # 4. 조회된 실시간 데이터를 최종 5개 경로에 주입 (Hydration)
+    # 조회된 실시간 데이터를 최종 5개 경로에 주입
     def match_subway(tmap_line, real_time_dict):
         t_line = tmap_line.replace("수도권", "").replace(" ", "")
         for api_line, times in real_time_dict.items():
@@ -338,7 +349,7 @@ async def process_optimized_route(request: RouteRequest):
                                 opt.arrivalTime1 = tago_times[0] if len(tago_times) > 0 else "시간표 참조"
                                 opt.arrivalTime2 = tago_times[1] if len(tago_times) > 1 else None
                                 break
-                break # 첫 탑승구간만 실시간 조회 주입
+                break 
                 
             elif seg.segmentType in ["SUBWAY", "TRAIN"]:
                 s_name = seg.startLocationName
