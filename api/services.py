@@ -14,7 +14,6 @@ for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'all_proxy
     os.environ.pop(key, None)
 
 TMAP_API_KEY = os.environ.get("TMAP_API_KEY")
-# 발급받으신 1개의 통합 키로 서울, 경기, 전국 API를 모두 호출합니다.
 TAGO_API_KEY = os.environ.get("TAGO_API_KEY") 
 SEOUL_SUBWAY_API_KEY = os.environ.get("SEOUL_SUBWAY_API_KEY")
 
@@ -55,22 +54,28 @@ async def fetch_seoul_subway_all(station_name: str, session: aiohttp.ClientSessi
     return station_name, {}
 
 # =====================================================================
-# 🚍 [스마트 라우터 1] 서울 시내버스 전용 탐색기
+# 🚍 [스마트 라우터 1] 서울 시내버스 전용 (Vercel 로깅 및 반경 300m 확장)
 # =====================================================================
 async def fetch_seoul_bus(lat, lon, session, key):
     try:
-        url_pos = f"http://ws.bus.go.kr/api/rest/stationinfo/getStationByPos?ServiceKey={key}&tmX={lon}&tmY={lat}&radius=150&resultType=json"
-        async with session.get(url_pos, timeout=2.5) as resp:
-            data = await resp.json()
+        url_pos = f"http://ws.bus.go.kr/api/rest/stationinfo/getStationByPos?ServiceKey={key}&tmX={lon}&tmY={lat}&radius=300&resultType=json"
+        async with session.get(url_pos, timeout=3.0) as resp:
+            text = await resp.text()
+            # 🌟 [로그 추가] 키 미등록 에러 발생 시 Vercel 콘솔에 출력
+            if "SERVICE_KEY_IS_NOT_REGISTERED_ERROR" in text or "INVALID_REQUEST_PARAMETER_ERROR" in text:
+                print("🚨 [서울 API 에러] 공공데이터 키가 아직 동기화되지 않았습니다. (1~2시간 소요 대기 필요)")
+                return {}
+                
+            data = await resp.json(content_type=None)
             items = data.get('msgBody', {}).get('itemList', [])
             if not items: return {}
-            ars_ids = [str(it['arsId']) for it in items[:2] if str(it.get('arsId', '0')) != '0']
+            ars_ids = [str(it['arsId']) for it in items[:3] if str(it.get('arsId', '0')) != '0']
 
         res = {}
         for ars_id in ars_ids:
             url_arr = f"http://ws.bus.go.kr/api/rest/stationinfo/getStationByUid?ServiceKey={key}&arsId={ars_id}&resultType=json"
-            async with session.get(url_arr, timeout=2.5) as resp:
-                arr_data = await resp.json()
+            async with session.get(url_arr, timeout=3.0) as resp:
+                arr_data = await resp.json(content_type=None)
                 for it in arr_data.get('msgBody', {}).get('itemList', []):
                     rtNm = it.get('rtNm')
                     msg1 = it.get('arrmsg1')
@@ -80,23 +85,30 @@ async def fetch_seoul_bus(lat, lon, session, key):
                         res[rtNm].append(msg1)
                         if msg2 and "종료" not in msg2: res[rtNm].append(msg2)
         return res
-    except Exception: return {}
+    except Exception as e: 
+        print(f"⚠️ 서울 버스 예외 발생: {e}")
+        return {}
 
 # =====================================================================
-# 🚍 [스마트 라우터 2] 경기도 시내/마을버스 전용 탐색기
+# 🚍 [스마트 라우터 2] 경기도 시내/마을버스 전용 (Vercel 로깅)
 # =====================================================================
 async def fetch_gyeonggi_bus(lat, lon, session, key):
     try:
         url_pos = f"http://apis.data.go.kr/6410000/busstationservice/getBusStationAroundList?serviceKey={key}&x={lon}&y={lat}"
-        async with session.get(url_pos, timeout=2.5) as resp:
-            root = ET.fromstring(await resp.text())
+        async with session.get(url_pos, timeout=3.0) as resp:
+            text = await resp.text()
+            if "SERVICE_KEY_IS_NOT_REGISTERED_ERROR" in text or "INVALID_REQUEST_PARAMETER_ERROR" in text:
+                print("🚨 [경기 API 에러] 공공데이터 키가 아직 동기화되지 않았습니다. (1~2시간 소요 대기 필요)")
+                return {}
+                
+            root = ET.fromstring(text)
             station_ids = [elem.text for elem in root.findall('.//stationId')][:3]
 
         route_ids = set()
         arrival_data = []
         for st_id in station_ids:
             url_arr = f"http://apis.data.go.kr/6410000/busarrivalservice/getBusArrivalList?serviceKey={key}&stationId={st_id}"
-            async with session.get(url_arr, timeout=2.5) as resp:
+            async with session.get(url_arr, timeout=3.0) as resp:
                 arr_root = ET.fromstring(await resp.text())
                 for item in arr_root.findall('.//busArrivalList'):
                     rid = item.findtext('routeId')
@@ -107,11 +119,10 @@ async def fetch_gyeonggi_bus(lat, lon, session, key):
                         arrival_data.append((rid, t1, t2))
 
         route_map = {}
-        # 노선 ID를 실제 버스 이름(예: 6-1)으로 번역
         async def resolve_route(rid):
             try:
                 u = f"http://apis.data.go.kr/6410000/busrouteservice/getBusRouteInfoItem?serviceKey={key}&routeId={rid}"
-                async with session.get(u, timeout=2.0) as r_resp:
+                async with session.get(u, timeout=2.5) as r_resp:
                     r_root = ET.fromstring(await r_resp.text())
                     return rid, r_root.findtext('.//routeName')
             except Exception: return rid, None
@@ -130,25 +141,27 @@ async def fetch_gyeonggi_bus(lat, lon, session, key):
                 res[rname].append(f"{t1}분 후")
                 if t2 and t2 != '0': res[rname].append(f"{t2}분 후")
         return res
-    except Exception: return {}
+    except Exception as e:
+        print(f"⚠️ 경기 버스 예외 발생: {e}")
+        return {}
 
 # =====================================================================
-# 🚍 [스마트 라우터 3] 전국구(TAGO) 범용 탐색기 (기존 유지)
+# 🚍 [스마트 라우터 3] 전국구(TAGO) 범용 (광역/지방버스)
 # =====================================================================
 async def fetch_tago_bus(lat, lon, session, key):
     try:
-        url = f"http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList?serviceKey={key}&gpsLati={lat}&gpsLong={lon}&_type=json&numOfRows=5&pageNo=1"
-        async with session.get(url, timeout=2.5) as resp:
-            data = await resp.json()
+        url = f"http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList?serviceKey={key}&gpsLati={lat}&gpsLong={lon}&_type=json&numOfRows=10&pageNo=1"
+        async with session.get(url, timeout=3.0) as resp:
+            data = await resp.json(content_type=None)
             items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
             if isinstance(items, dict): items = [items]
             nodes = [(str(it.get("citycode", "")), str(it.get("nodeid", ""))) for it in items if it.get("citycode") and it.get("nodeid")]
 
         res = {}
         for city, node in nodes[:3]:
-            url_arr = f"http://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList?serviceKey={key}&cityCode={city}&nodeId={node}&_type=json&numOfRows=15&pageNo=1"
-            async with session.get(url_arr, timeout=2.5) as arr_resp:
-                arr_data = await arr_resp.json()
+            url_arr = f"http://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList?serviceKey={key}&cityCode={city}&nodeId={node}&_type=json&numOfRows=20&pageNo=1"
+            async with session.get(url_arr, timeout=3.0) as arr_resp:
+                arr_data = await arr_resp.json(content_type=None)
                 arr_items = arr_data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
                 if isinstance(arr_items, dict): arr_items = [arr_items]
                 for item in arr_items:
@@ -173,7 +186,6 @@ async def fetch_all_bus_arrivals(lat_str, lon_str, session, sem):
     
     async with sem:
         lat, lon = float(lat_str), float(lon_str)
-        # 서울, 경기, 전국 API를 동시에 호출합니다.
         tasks = [
             fetch_seoul_bus(lat, lon, session, key),
             fetch_gyeonggi_bus(lat, lon, session, key),
@@ -376,7 +388,6 @@ async def process_optimized_route(request: RouteRequest):
         
         if tasks:
             try:
-                # 🌟 [넉넉한 대기시간] 3개의 서버를 동시 호출하므로 시간을 조금 더 확보합니다.
                 results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=7.5)
                 for res in results:
                     if not isinstance(res, Exception):
@@ -404,6 +415,7 @@ async def process_optimized_route(request: RouteRequest):
                     real_time = bus_data.get(f"{lat}_{lon}", {})
                     
                     for opt in seg.transitOptions:
+                        # 🌟 정규식 보수: 한글/공백 제거 후 순수 숫자/알파벳/하이픈만 비교
                         r_clean = re.sub(r'[^a-zA-Z0-9\-]', '', opt.routeName).lstrip('0')
                         for api_bus_no, api_times in real_time.items():
                             api_clean = re.sub(r'[^a-zA-Z0-9\-]', '', api_bus_no).lstrip('0')
