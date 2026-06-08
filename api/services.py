@@ -5,7 +5,6 @@ import itertools
 import urllib.parse
 import re
 import asyncio  
-import xml.etree.ElementTree as ET
 from fastapi import HTTPException
 from api.schemas import RouteRequest, RouteResponse, RouteSegment, LocationPoint, Coordinate, TransitOption
 
@@ -54,7 +53,7 @@ async def fetch_seoul_subway_all(station_name: str, session: aiohttp.ClientSessi
     return station_name, {}
 
 # =====================================================================
-# 🚍 [스마트 라우터 1] 서울 시내버스 전용 (Vercel 로깅 및 반경 300m 확장)
+# 🚍 [스마트 라우터 1] 서울 시내버스 전용
 # =====================================================================
 async def fetch_seoul_bus(lat, lon, session, key):
     try:
@@ -62,7 +61,6 @@ async def fetch_seoul_bus(lat, lon, session, key):
         async with session.get(url_pos, timeout=3.0) as resp:
             text = await resp.text()
             if "SERVICE_KEY_IS_NOT_REGISTERED_ERROR" in text or "INVALID_REQUEST_PARAMETER_ERROR" in text:
-                print("🚨 [서울 API 에러] 키 미등록 상태입니다.")
                 return {}
             data = await resp.json(content_type=None)
             items = data.get('msgBody', {}).get('itemList', [])
@@ -86,54 +84,62 @@ async def fetch_seoul_bus(lat, lon, session, key):
     except Exception: return {}
 
 # =====================================================================
-# 🚍 [스마트 라우터 2] 경기도 시내/마을버스 전용 (🌟 신형 V2 API 완벽 적용)
+# 🚍 [스마트 라우터 2] 경기도 시내/마을버스 전용 (🌟 JSON 파싱으로 완벽 교체 완료!)
 # =====================================================================
 async def fetch_gyeonggi_bus(lat, lon, session, key):
     try:
-        # 🌟 V2 전용 주소로 교체: /v2/getBusStationAroundListv2
-        url_pos = f"http://apis.data.go.kr/6410000/busstationservice/v2/getBusStationAroundListv2?serviceKey={key}&x={lon}&y={lat}"
+        # 응답 형식을 JSON으로 명시하여 호출
+        url_pos = f"http://apis.data.go.kr/6410000/busstationservice/v2/getBusStationAroundListv2?serviceKey={key}&x={lon}&y={lat}&format=json"
         async with session.get(url_pos, timeout=3.0) as resp:
             text = await resp.text()
-            if not text.strip() or "API not found" in text:
-                print(f"🚨 [경기 API 에러] 잘못된 응답: {text[:100]}")
+            if "SERVICE_KEY" in text or "ERROR" in text:
                 return {}
-            
+                
             try:
-                root = ET.fromstring(text)
+                # 🌟 XML이 아닌 JSON 객체로 파싱!
+                data = await resp.json(content_type=None)
             except Exception as e:
-                print(f"🚨 [경기 API 파싱 실패] V2 응답 에러: {text[:200]}")
+                print(f"🚨 경기 API JSON 파싱 에러(정류장): {e}")
                 return {}
 
-            station_ids = [elem.text for elem in root.findall('.//stationId')][:3]
+            items = data.get("response", {}).get("msgBody", {}).get("busStationAroundList", [])
+            if not items: return {}
+            if isinstance(items, dict): items = [items]
+            
+            # 정류장 ID 추출
+            station_ids = [str(it.get("stationId")) for it in items[:3] if it.get("stationId")]
 
         route_ids = set()
         arrival_data = []
         for st_id in station_ids:
-            # 🌟 V2 전용 주소로 교체: /v2/getBusArrivalListv2
-            url_arr = f"http://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalListv2?serviceKey={key}&stationId={st_id}"
+            url_arr = f"http://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalListv2?serviceKey={key}&stationId={st_id}&format=json"
             async with session.get(url_arr, timeout=3.0) as resp:
-                arr_text = await resp.text()
                 try:
-                    arr_root = ET.fromstring(arr_text)
-                    for item in arr_root.findall('.//busArrivalList'):
-                        rid = item.findtext('routeId')
-                        t1 = item.findtext('predictTime1')
-                        t2 = item.findtext('predictTime2')
-                        if rid and t1 and t1 != '0':
+                    arr_data = await resp.json(content_type=None)
+                    arr_items = arr_data.get("response", {}).get("msgBody", {}).get("busArrivalList", [])
+                    if not arr_items: continue
+                    if isinstance(arr_items, dict): arr_items = [arr_items]
+                    
+                    for item in arr_items:
+                        rid = str(item.get("routeId", ""))
+                        t1 = str(item.get("predictTime1", ""))
+                        t2 = str(item.get("predictTime2", ""))
+                        if rid and t1 and t1 != '0' and t1 != 'None':
                             route_ids.add(rid)
                             arrival_data.append((rid, t1, t2))
-                except Exception:
-                    pass
+                except Exception: pass
 
         route_map = {}
         async def resolve_route(rid):
             try:
-                # 🌟 V2 전용 주소로 교체: /v2/getBusRouteInfoItemv2
-                u = f"http://apis.data.go.kr/6410000/busrouteservice/v2/getBusRouteInfoItemv2?serviceKey={key}&routeId={rid}"
+                u = f"http://apis.data.go.kr/6410000/busrouteservice/v2/getBusRouteInfoItemv2?serviceKey={key}&routeId={rid}&format=json"
                 async with session.get(u, timeout=2.5) as r_resp:
-                    r_text = await r_resp.text()
-                    r_root = ET.fromstring(r_text)
-                    return rid, r_root.findtext('.//routeName')
+                    r_data = await r_resp.json(content_type=None)
+                    r_item = r_data.get("response", {}).get("msgBody", {}).get("busRouteInfoItem", {})
+                    if isinstance(r_item, list) and len(r_item) > 0:
+                        r_item = r_item[0]
+                    rname = r_item.get("routeName")
+                    return rid, str(rname) if rname else None
             except Exception: return rid, None
 
         if route_ids:
@@ -149,7 +155,7 @@ async def fetch_gyeonggi_bus(lat, lon, session, key):
             if rname:
                 if rname not in res: res[rname] = []
                 res[rname].append(f"{t1}분 후")
-                if t2 and t2 != '0': res[rname].append(f"{t2}분 후")
+                if t2 and t2 != '0' and t2 != 'None': res[rname].append(f"{t2}분 후")
         return res
     except Exception as e:
         print(f"⚠️ 경기 버스 예외 발생: {e}")
