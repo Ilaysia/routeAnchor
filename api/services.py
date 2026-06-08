@@ -90,18 +90,30 @@ async def fetch_seoul_bus(lat, lon, session, key):
         return {}
 
 # =====================================================================
-# 🚍 [스마트 라우터 2] 경기도 시내/마을버스 전용 (Vercel 로깅)
+# 🚍 [스마트 라우터 2] 경기도 시내/마을버스 전용 (초정밀 로깅 추가)
 # =====================================================================
 async def fetch_gyeonggi_bus(lat, lon, session, key):
     try:
         url_pos = f"http://apis.data.go.kr/6410000/busstationservice/getBusStationAroundList?serviceKey={key}&x={lon}&y={lat}"
         async with session.get(url_pos, timeout=3.0) as resp:
             text = await resp.text()
-            if "SERVICE_KEY_IS_NOT_REGISTERED_ERROR" in text or "INVALID_REQUEST_PARAMETER_ERROR" in text:
-                print("🚨 [경기 API 에러] 공공데이터 키가 아직 동기화되지 않았습니다. (1~2시간 소요 대기 필요)")
+            
+            # 🌟 [로그 출력] 경기도 서버가 실제로 뭐라고 대답했는지 출력
+            if not text.strip():
+                print("🚨 [경기 API 에러] 서버가 텅 빈 응답(Empty)을 보냈습니다.")
+                return {}
+            
+            if "SERVICE_KEY" in text or "ERROR" in text or "<OpenAPI_ServiceResponse>" in text:
+                print(f"🚨 [경기 API 에러 상세 메시지]: {text[:200]}")
                 return {}
                 
-            root = ET.fromstring(text)
+            try:
+                # 여기서 에러가 났던 것입니다. 안전하게 try-except로 감쌉니다.
+                root = ET.fromstring(text)
+            except Exception as e:
+                print(f"🚨 [경기 API XML 파싱 실패] 서버가 이상한 값을 줬습니다: {text[:200]}")
+                return {}
+
             station_ids = [elem.text for elem in root.findall('.//stationId')][:3]
 
         route_ids = set()
@@ -109,21 +121,26 @@ async def fetch_gyeonggi_bus(lat, lon, session, key):
         for st_id in station_ids:
             url_arr = f"http://apis.data.go.kr/6410000/busarrivalservice/getBusArrivalList?serviceKey={key}&stationId={st_id}"
             async with session.get(url_arr, timeout=3.0) as resp:
-                arr_root = ET.fromstring(await resp.text())
-                for item in arr_root.findall('.//busArrivalList'):
-                    rid = item.findtext('routeId')
-                    t1 = item.findtext('predictTime1')
-                    t2 = item.findtext('predictTime2')
-                    if rid and t1 and t1 != '0':
-                        route_ids.add(rid)
-                        arrival_data.append((rid, t1, t2))
+                arr_text = await resp.text()
+                try:
+                    arr_root = ET.fromstring(arr_text)
+                    for item in arr_root.findall('.//busArrivalList'):
+                        rid = item.findtext('routeId')
+                        t1 = item.findtext('predictTime1')
+                        t2 = item.findtext('predictTime2')
+                        if rid and t1 and t1 != '0':
+                            route_ids.add(rid)
+                            arrival_data.append((rid, t1, t2))
+                except Exception:
+                    pass # 개별 정류장 에러는 무시하고 넘어감
 
         route_map = {}
         async def resolve_route(rid):
             try:
                 u = f"http://apis.data.go.kr/6410000/busrouteservice/getBusRouteInfoItem?serviceKey={key}&routeId={rid}"
                 async with session.get(u, timeout=2.5) as r_resp:
-                    r_root = ET.fromstring(await r_resp.text())
+                    r_text = await r_resp.text()
+                    r_root = ET.fromstring(r_text)
                     return rid, r_root.findtext('.//routeName')
             except Exception: return rid, None
 
