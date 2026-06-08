@@ -5,6 +5,7 @@ import itertools
 import urllib.parse
 import re
 import asyncio  
+import xml.etree.ElementTree as ET
 from fastapi import HTTPException
 from api.schemas import RouteRequest, RouteResponse, RouteSegment, LocationPoint, Coordinate, TransitOption
 
@@ -58,10 +59,9 @@ async def fetch_seoul_subway_all(station_name: str, session: aiohttp.ClientSessi
 async def fetch_seoul_bus(lat, lon, session, key):
     try:
         url_pos = f"http://ws.bus.go.kr/api/rest/stationinfo/getStationByPos?ServiceKey={key}&tmX={lon}&tmY={lat}&radius=300&resultType=json"
-        async with session.get(url_pos, timeout=3.0) as resp:
+        async with session.get(url_pos, timeout=3.5) as resp:
             text = await resp.text()
-            if "SERVICE_KEY_IS_NOT_REGISTERED_ERROR" in text or "INVALID_REQUEST_PARAMETER_ERROR" in text:
-                return {}
+            if "SERVICE_KEY" in text or "ERROR" in text: return {}
             data = await resp.json(content_type=None)
             items = data.get('msgBody', {}).get('itemList', [])
             if not items: return {}
@@ -70,7 +70,7 @@ async def fetch_seoul_bus(lat, lon, session, key):
         res = {}
         for ars_id in ars_ids:
             url_arr = f"http://ws.bus.go.kr/api/rest/stationinfo/getStationByUid?ServiceKey={key}&arsId={ars_id}&resultType=json"
-            async with session.get(url_arr, timeout=3.0) as resp:
+            async with session.get(url_arr, timeout=3.5) as resp:
                 arr_data = await resp.json(content_type=None)
                 for it in arr_data.get('msgBody', {}).get('itemList', []):
                     rtNm = it.get('rtNm')
@@ -84,39 +84,45 @@ async def fetch_seoul_bus(lat, lon, session, key):
     except Exception: return {}
 
 # =====================================================================
-# 🚍 [스마트 라우터 2] 경기도 시내/마을버스 전용 (🌟 JSON 파싱으로 완벽 교체 완료!)
+# 🚍 [스마트 라우터 2] 경기도 시내/마을버스 전용 (🌟 철벽 방어 파싱 & 타임아웃 연장)
 # =====================================================================
 async def fetch_gyeonggi_bus(lat, lon, session, key):
     try:
-        # 응답 형식을 JSON으로 명시하여 호출
         url_pos = f"http://apis.data.go.kr/6410000/busstationservice/v2/getBusStationAroundListv2?serviceKey={key}&x={lon}&y={lat}&format=json"
-        async with session.get(url_pos, timeout=3.0) as resp:
+        # 🌟 서버가 느리므로 4초까지 기다려줍니다.
+        async with session.get(url_pos, timeout=4.0) as resp:
             text = await resp.text()
-            if "SERVICE_KEY" in text or "ERROR" in text:
-                return {}
-                
+            if "SERVICE_KEY" in text or "ERROR" in text: return {}
             try:
-                # 🌟 XML이 아닌 JSON 객체로 파싱!
                 data = await resp.json(content_type=None)
-            except Exception as e:
-                print(f"🚨 경기 API JSON 파싱 에러(정류장): {e}")
-                return {}
+            except Exception: return {}
 
-            items = data.get("response", {}).get("msgBody", {}).get("busStationAroundList", [])
+            # 🌟 [철벽 방어] msgBody가 텅 빈 문자열("")로 와도 죽지 않게 딕셔너리 검증
+            resp_dict = data.get("response", {})
+            if not isinstance(resp_dict, dict): resp_dict = {}
+            body_dict = resp_dict.get("msgBody", {})
+            if not isinstance(body_dict, dict): body_dict = {}
+
+            items = body_dict.get("busStationAroundList", [])
             if not items: return {}
             if isinstance(items, dict): items = [items]
             
-            # 정류장 ID 추출
             station_ids = [str(it.get("stationId")) for it in items[:3] if it.get("stationId")]
 
         route_ids = set()
         arrival_data = []
         for st_id in station_ids:
             url_arr = f"http://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalListv2?serviceKey={key}&stationId={st_id}&format=json"
-            async with session.get(url_arr, timeout=3.0) as resp:
-                try:
+            try:
+                async with session.get(url_arr, timeout=4.0) as resp:
                     arr_data = await resp.json(content_type=None)
-                    arr_items = arr_data.get("response", {}).get("msgBody", {}).get("busArrivalList", [])
+                    
+                    r_dict = arr_data.get("response", {})
+                    if not isinstance(r_dict, dict): r_dict = {}
+                    b_dict = r_dict.get("msgBody", {})
+                    if not isinstance(b_dict, dict): b_dict = {}
+                    
+                    arr_items = b_dict.get("busArrivalList", [])
                     if not arr_items: continue
                     if isinstance(arr_items, dict): arr_items = [arr_items]
                     
@@ -127,15 +133,24 @@ async def fetch_gyeonggi_bus(lat, lon, session, key):
                         if rid and t1 and t1 != '0' and t1 != 'None':
                             route_ids.add(rid)
                             arrival_data.append((rid, t1, t2))
-                except Exception: pass
+            except asyncio.TimeoutError:
+                pass # 특정 정류장이 뻗어도 다른 정류장은 계속 진행
+            except Exception:
+                pass
 
         route_map = {}
         async def resolve_route(rid):
             try:
                 u = f"http://apis.data.go.kr/6410000/busrouteservice/v2/getBusRouteInfoItemv2?serviceKey={key}&routeId={rid}&format=json"
-                async with session.get(u, timeout=2.5) as r_resp:
+                async with session.get(u, timeout=3.0) as r_resp:
                     r_data = await r_resp.json(content_type=None)
-                    r_item = r_data.get("response", {}).get("msgBody", {}).get("busRouteInfoItem", {})
+                    
+                    r_dict = r_data.get("response", {})
+                    if not isinstance(r_dict, dict): r_dict = {}
+                    b_dict = r_dict.get("msgBody", {})
+                    if not isinstance(b_dict, dict): b_dict = {}
+                    
+                    r_item = b_dict.get("busRouteInfoItem", {})
                     if isinstance(r_item, list) and len(r_item) > 0:
                         r_item = r_item[0]
                     rname = r_item.get("routeName")
@@ -158,7 +173,8 @@ async def fetch_gyeonggi_bus(lat, lon, session, key):
                 if t2 and t2 != '0' and t2 != 'None': res[rname].append(f"{t2}분 후")
         return res
     except Exception as e:
-        print(f"⚠️ 경기 버스 예외 발생: {e}")
+        # 🌟 이제 에러가 나면 텅 빈 문자가 아니라 (TimeoutError) 처럼 본명이 찍힙니다!
+        print(f"⚠️ 경기 버스 예외 발생 ({type(e).__name__}): {str(e)}")
         return {}
 
 # =====================================================================
@@ -167,7 +183,7 @@ async def fetch_gyeonggi_bus(lat, lon, session, key):
 async def fetch_tago_bus(lat, lon, session, key):
     try:
         url = f"http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList?serviceKey={key}&gpsLati={lat}&gpsLong={lon}&_type=json&numOfRows=10&pageNo=1"
-        async with session.get(url, timeout=3.0) as resp:
+        async with session.get(url, timeout=3.5) as resp:
             data = await resp.json(content_type=None)
             items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
             if isinstance(items, dict): items = [items]
@@ -176,7 +192,7 @@ async def fetch_tago_bus(lat, lon, session, key):
         res = {}
         for city, node in nodes[:3]:
             url_arr = f"http://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList?serviceKey={key}&cityCode={city}&nodeId={node}&_type=json&numOfRows=20&pageNo=1"
-            async with session.get(url_arr, timeout=3.0) as arr_resp:
+            async with session.get(url_arr, timeout=3.5) as arr_resp:
                 arr_data = await arr_resp.json(content_type=None)
                 arr_items = arr_data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
                 if isinstance(arr_items, dict): arr_items = [arr_items]
@@ -404,7 +420,8 @@ async def process_optimized_route(request: RouteRequest):
         
         if tasks:
             try:
-                results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=7.5)
+                # 🌟 [넉넉한 8.5초] 타임아웃을 8.5초로 연장하여 Vercel 한계치까지 느린 경기도 서버를 기다려줍니다.
+                results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=8.5)
                 for res in results:
                     if not isinstance(res, Exception):
                         k, v = res
