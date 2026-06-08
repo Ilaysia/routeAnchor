@@ -5,6 +5,7 @@ import itertools
 import urllib.parse
 import re
 import asyncio  
+import xml.etree.ElementTree as ET
 from fastapi import HTTPException
 from api.schemas import RouteRequest, RouteResponse, RouteSegment, LocationPoint, Coordinate, TransitOption
 
@@ -13,10 +14,10 @@ for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'all_proxy
     os.environ.pop(key, None)
 
 TMAP_API_KEY = os.environ.get("TMAP_API_KEY")
-TAGO_API_KEY = os.environ.get("TAGO_API_KEY")
+# 발급받으신 1개의 통합 키로 서울, 경기, 전국 API를 모두 호출합니다.
+TAGO_API_KEY = os.environ.get("TAGO_API_KEY") 
 SEOUL_SUBWAY_API_KEY = os.environ.get("SEOUL_SUBWAY_API_KEY")
 
-# 서울 지하철 고유 ID 맵핑 사전
 SUBWAY_ID_MAP = {
     "1001": "1호선", "1002": "2호선", "1003": "3호선", "1004": "4호선",
     "1005": "5호선", "1006": "6호선", "1007": "7호선", "1008": "8호선",
@@ -26,16 +27,14 @@ SUBWAY_ID_MAP = {
 }
 
 # =====================================================================
-# 서울/수도권 지하철 실시간 도착 정보 조회
+# 🚇 [지하철] 서울/수도권 지하철 실시간 도착 정보
 # =====================================================================
 async def fetch_seoul_subway_all(station_name: str, session: aiohttp.ClientSession) -> tuple:
     if not SEOUL_SUBWAY_API_KEY: return station_name, {}
-    
     subway_key = SEOUL_SUBWAY_API_KEY.strip()
     clean_name = re.split(r'역|\(|\.|·', station_name)[0].strip()
     encoded_name = urllib.parse.quote(clean_name)
     url = f"http://swopenapi.seoul.go.kr/api/subway/{subway_key}/json/realtimeStationArrival/0/15/{encoded_name}"
-    
     try:
         async with session.get(url, timeout=3.5) as response:
             if response.status == 200:
@@ -45,84 +44,152 @@ async def fetch_seoul_subway_all(station_name: str, session: aiohttp.ClientSessi
                 for item in realtime_list:
                     subway_id = str(item.get("subwayId", ""))
                     subway_nm = SUBWAY_ID_MAP.get(subway_id, "")
-                    if not subway_nm: 
-                        subway_nm = str(item.get("subwayNm", "")).replace(" ", "")
-                        
+                    if not subway_nm: subway_nm = str(item.get("subwayNm", "")).replace(" ", "")
                     msg = item.get("arvlMsg2")
                     if subway_nm and msg:
                         if subway_nm not in res: res[subway_nm] = []
                         res[subway_nm].append(msg)
-                
                 for k in res: res[k] = list(dict.fromkeys(res[k]))[:2]
                 return station_name, res
     except Exception: pass
     return station_name, {}
 
 # =====================================================================
-# 공공데이터(TAGO) 버스 정류장 및 실시간 정보 조회
+# 🚍 [스마트 라우터 1] 서울 시내버스 전용 탐색기
 # =====================================================================
-async def get_tago_nodes(lat: float, lon: float, session: aiohttp.ClientSession) -> list:
-    if not TAGO_API_KEY: return []
-    key = TAGO_API_KEY.strip()
-    
-    # 🌟 [수정] 마을버스 노드가 뒤로 밀리는 현상 방지 위해 numOfRows를 10으로 확장
-    url = f"http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList?serviceKey={key}&gpsLati={lat}&gpsLong={lon}&_type=json&numOfRows=10&pageNo=1"
-    
+async def fetch_seoul_bus(lat, lon, session, key):
     try:
-        async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=3.5) as response:
-            if response.status != 200: return []
-            data = await response.json()
-            items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
-            if isinstance(items, dict): items = [items]
-            return [(str(it.get("citycode", "")), str(it.get("nodeid", ""))) for it in items if it.get("citycode") and it.get("nodeid")]
-    except Exception: return []
+        url_pos = f"http://ws.bus.go.kr/api/rest/stationinfo/getStationByPos?ServiceKey={key}&tmX={lon}&tmY={lat}&radius=150&resultType=json"
+        async with session.get(url_pos, timeout=2.5) as resp:
+            data = await resp.json()
+            items = data.get('msgBody', {}).get('itemList', [])
+            if not items: return {}
+            ars_ids = [str(it['arsId']) for it in items[:2] if str(it.get('arsId', '0')) != '0']
 
-async def fetch_tago_bus_arrivals(node_id: str, city_code: str, session: aiohttp.ClientSession) -> dict:
-    if not TAGO_API_KEY: return {}
-    key = TAGO_API_KEY.strip()
-    
-    url = f"http://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList?serviceKey={key}&cityCode={city_code}&nodeId={node_id}&_type=json&numOfRows=20&pageNo=1"
-    
-    try:
-        async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=3.5) as response: 
-            if response.status != 200: return {}
-            data = await response.json()
-            items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
-            if isinstance(items, dict): items = [items]
-            
-            bus_info = {}
-            for item in items:
-                route_no = str(item.get("routeno"))
-                arr_time_min = item.get("arrtime", 0) // 60
-                if route_no not in bus_info: bus_info[route_no] = []
-                bus_info[route_no].append(arr_time_min)
-                
-            result = {}
-            for bus, times in bus_info.items():
-                times.sort()
-                result[bus] = [f"{t}분 후" if t > 0 else "곧 도착" for t in times][:2]
-            return result
+        res = {}
+        for ars_id in ars_ids:
+            url_arr = f"http://ws.bus.go.kr/api/rest/stationinfo/getStationByUid?ServiceKey={key}&arsId={ars_id}&resultType=json"
+            async with session.get(url_arr, timeout=2.5) as resp:
+                arr_data = await resp.json()
+                for it in arr_data.get('msgBody', {}).get('itemList', []):
+                    rtNm = it.get('rtNm')
+                    msg1 = it.get('arrmsg1')
+                    msg2 = it.get('arrmsg2')
+                    if rtNm and msg1 and "종료" not in msg1:
+                        if rtNm not in res: res[rtNm] = []
+                        res[rtNm].append(msg1)
+                        if msg2 and "종료" not in msg2: res[rtNm].append(msg2)
+        return res
     except Exception: return {}
 
-async def fetch_and_cache(lat_str: str, lon_str: str, session: aiohttp.ClientSession, sem: asyncio.Semaphore):
+# =====================================================================
+# 🚍 [스마트 라우터 2] 경기도 시내/마을버스 전용 탐색기
+# =====================================================================
+async def fetch_gyeonggi_bus(lat, lon, session, key):
+    try:
+        url_pos = f"http://apis.data.go.kr/6410000/busstationservice/getBusStationAroundList?serviceKey={key}&x={lon}&y={lat}"
+        async with session.get(url_pos, timeout=2.5) as resp:
+            root = ET.fromstring(await resp.text())
+            station_ids = [elem.text for elem in root.findall('.//stationId')][:3]
+
+        route_ids = set()
+        arrival_data = []
+        for st_id in station_ids:
+            url_arr = f"http://apis.data.go.kr/6410000/busarrivalservice/getBusArrivalList?serviceKey={key}&stationId={st_id}"
+            async with session.get(url_arr, timeout=2.5) as resp:
+                arr_root = ET.fromstring(await resp.text())
+                for item in arr_root.findall('.//busArrivalList'):
+                    rid = item.findtext('routeId')
+                    t1 = item.findtext('predictTime1')
+                    t2 = item.findtext('predictTime2')
+                    if rid and t1 and t1 != '0':
+                        route_ids.add(rid)
+                        arrival_data.append((rid, t1, t2))
+
+        route_map = {}
+        # 노선 ID를 실제 버스 이름(예: 6-1)으로 번역
+        async def resolve_route(rid):
+            try:
+                u = f"http://apis.data.go.kr/6410000/busrouteservice/getBusRouteInfoItem?serviceKey={key}&routeId={rid}"
+                async with session.get(u, timeout=2.0) as r_resp:
+                    r_root = ET.fromstring(await r_resp.text())
+                    return rid, r_root.findtext('.//routeName')
+            except Exception: return rid, None
+
+        r_results = await asyncio.gather(*[resolve_route(r) for r in route_ids], return_exceptions=True)
+        for res in r_results:
+            if not isinstance(res, Exception):
+                rid, rname = res
+                if rname: route_map[rid] = rname
+
+        res = {}
+        for rid, t1, t2 in arrival_data:
+            rname = route_map.get(rid)
+            if rname:
+                if rname not in res: res[rname] = []
+                res[rname].append(f"{t1}분 후")
+                if t2 and t2 != '0': res[rname].append(f"{t2}분 후")
+        return res
+    except Exception: return {}
+
+# =====================================================================
+# 🚍 [스마트 라우터 3] 전국구(TAGO) 범용 탐색기 (기존 유지)
+# =====================================================================
+async def fetch_tago_bus(lat, lon, session, key):
+    try:
+        url = f"http://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList?serviceKey={key}&gpsLati={lat}&gpsLong={lon}&_type=json&numOfRows=5&pageNo=1"
+        async with session.get(url, timeout=2.5) as resp:
+            data = await resp.json()
+            items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
+            if isinstance(items, dict): items = [items]
+            nodes = [(str(it.get("citycode", "")), str(it.get("nodeid", ""))) for it in items if it.get("citycode") and it.get("nodeid")]
+
+        res = {}
+        for city, node in nodes[:3]:
+            url_arr = f"http://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList?serviceKey={key}&cityCode={city}&nodeId={node}&_type=json&numOfRows=15&pageNo=1"
+            async with session.get(url_arr, timeout=2.5) as arr_resp:
+                arr_data = await arr_resp.json()
+                arr_items = arr_data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
+                if isinstance(arr_items, dict): arr_items = [arr_items]
+                for item in arr_items:
+                    route_no = str(item.get("routeno"))
+                    arr_time = item.get("arrtime", 0) // 60
+                    if route_no not in res: res[route_no] = []
+                    res[route_no].append(arr_time)
+
+        final_res = {}
+        for bus, times in res.items():
+            times.sort()
+            final_res[bus] = [f"{t}분 후" if t > 0 else "곧 도착" for t in times][:2]
+        return final_res
+    except Exception: return {}
+
+# =====================================================================
+# 🚀 3대 라우터 동시 발사 및 데이터 병합
+# =====================================================================
+async def fetch_all_bus_arrivals(lat_str, lon_str, session, sem):
+    if not TAGO_API_KEY: return f"{lat_str}_{lon_str}", {}
+    key = TAGO_API_KEY.strip()
+    
     async with sem:
-        nodes = await get_tago_nodes(float(lat_str), float(lon_str), session)
-        
-    merged_bus_info = {}
-    if nodes:
-        async def bounded_fetch(node, city):
-            async with sem:
-                return await fetch_tago_bus_arrivals(node, city, session)
-                
-        tasks = [bounded_fetch(node, city) for city, node in nodes]
+        lat, lon = float(lat_str), float(lon_str)
+        # 서울, 경기, 전국 API를 동시에 호출합니다.
+        tasks = [
+            fetch_seoul_bus(lat, lon, session, key),
+            fetch_gyeonggi_bus(lat, lon, session, key),
+            fetch_tago_bus(lat, lon, session, key)
+        ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
+
+        merged_bus_info = {}
         for res in results:
             if isinstance(res, dict):
-                for bus_no, times in res.items():
-                    if bus_no not in merged_bus_info: merged_bus_info[bus_no] = times
-                    else: merged_bus_info[bus_no] = list(dict.fromkeys(merged_bus_info[bus_no] + times))[:2]
-    return f"{lat_str}_{lon_str}", merged_bus_info
+                for bus, times in res.items():
+                    if bus not in merged_bus_info:
+                        merged_bus_info[bus] = times
+                    else:
+                        merged_bus_info[bus] = list(dict.fromkeys(merged_bus_info[bus] + times))[:2]
+        return f"{lat_str}_{lon_str}", merged_bus_info
 
 # =====================================================================
 # TMAP 로직 (실시간 조회를 뺀 초고속 순수 탐색)
@@ -199,10 +266,8 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                         else:
                             route_name = leg.get("route", "대중교통")
                             route_names = [r.strip() for r in route_name.split(",")]
-                            
                             s_lat, s_lon = leg.get("start", {}).get("lat"), leg.get("start", {}).get("lon")
                             
-                            # 🌟 [수정] 정확도 100% 보장: TMAP의 모호한 출발지가 아닌 '첫 번째 통과 정류장' 좌표 획득
                             pass_stops = leg.get("passStopList", {}).get("stationList", [])
                             if pass_stops:
                                 s_lat = pass_stops[0].get("lat", s_lat)
@@ -218,7 +283,6 @@ async def fetch_segments_from_tmap(start: LocationPoint, end: LocationPoint, opt
                             ls = pass_shape if isinstance(pass_shape, str) else (pass_shape.get("linestring", "") if pass_shape else "")
                             path_coords.extend(parse_linestring(ls))
                             
-                            # 정확하게 획득한 정류장 좌표를 경로 맨 앞에 삽입 (타겟팅 용도)
                             if s_lat and s_lon and not path_coords:
                                 path_coords.insert(0, Coordinate(latitude=float(s_lat), longitude=float(s_lon)))
                             elif s_lat and s_lon:
@@ -289,7 +353,6 @@ async def process_optimized_route(request: RouteRequest):
             endCoordinate=Coordinate(latitude=all_points[-1].latitude, longitude=all_points[-1].longitude)
         ))
 
-    # 타겟팅 조회
     unique_bus_coords = set()
     unique_subways = set()
     
@@ -303,26 +366,26 @@ async def process_optimized_route(request: RouteRequest):
                 unique_subways.add(seg.startLocationName)
                 break
 
-    tago_data = {}
+    bus_data = {}
     subway_data = {}
 
     async with aiohttp.ClientSession() as session:
-        sem = asyncio.Semaphore(10) # 속도 향상을 위해 동시 요청 10개 허용
-        tasks = [fetch_and_cache(lat, lon, session, sem) for lat, lon in unique_bus_coords]
+        sem = asyncio.Semaphore(15) 
+        tasks = [fetch_all_bus_arrivals(lat, lon, session, sem) for lat, lon in unique_bus_coords]
         tasks += [fetch_seoul_subway_all(name, session) for name in unique_subways]
         
         if tasks:
             try:
+                # 🌟 [넉넉한 대기시간] 3개의 서버를 동시 호출하므로 시간을 조금 더 확보합니다.
                 results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=7.5)
                 for res in results:
                     if not isinstance(res, Exception):
                         k, v = res
-                        if "_" in k: tago_data[k] = v
+                        if "_" in k: bus_data[k] = v
                         else: subway_data[k] = v
             except asyncio.TimeoutError:
                 pass 
 
-    # 조회된 실시간 데이터를 최종 5개 경로에 주입
     def match_subway(tmap_line, real_time_dict):
         t_line = tmap_line.replace("수도권", "").replace(" ", "")
         for api_line, times in real_time_dict.items():
@@ -338,18 +401,16 @@ async def process_optimized_route(request: RouteRequest):
             if seg.segmentType == "BUS":
                 if seg.pathCoordinates:
                     lat, lon = str(seg.pathCoordinates[0].latitude), str(seg.pathCoordinates[0].longitude)
-                    real_time = tago_data.get(f"{lat}_{lon}", {})
+                    real_time = bus_data.get(f"{lat}_{lon}", {})
                     
                     for opt in seg.transitOptions:
-                        # 🌟 [수정] 영문, 숫자, 하이픈(-) 외 전부 제거 및 앞의 0 제거 (06-1 -> 6-1 대응 완벽)
                         r_clean = re.sub(r'[^a-zA-Z0-9\-]', '', opt.routeName).lstrip('0')
-                        for tago_bus_no, tago_times in real_time.items():
-                            tago_clean = re.sub(r'[^a-zA-Z0-9\-]', '', tago_bus_no).lstrip('0')
+                        for api_bus_no, api_times in real_time.items():
+                            api_clean = re.sub(r'[^a-zA-Z0-9\-]', '', api_bus_no).lstrip('0')
                             
-                            # 완전히 똑같을 때만 데이터 주입 (오류 원천 차단)
-                            if r_clean and tago_clean and r_clean == tago_clean:
-                                opt.arrivalTime1 = tago_times[0] if len(tago_times) > 0 else "시간표 참조"
-                                opt.arrivalTime2 = tago_times[1] if len(tago_times) > 1 else None
+                            if r_clean and api_clean and (r_clean == api_clean or r_clean in api_clean or api_clean in r_clean):
+                                opt.arrivalTime1 = api_times[0] if len(api_times) > 0 else "시간표 참조"
+                                opt.arrivalTime2 = api_times[1] if len(api_times) > 1 else None
                                 break
                 break 
                 
