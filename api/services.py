@@ -84,12 +84,11 @@ async def fetch_seoul_bus(lat, lon, session, key):
     except Exception: return {}
 
 # =====================================================================
-# 🚍 [스마트 라우터 2] 경기도 시내/마을버스 전용 (🌟 철벽 방어 파싱 & 타임아웃 연장)
+# 🚍 [스마트 라우터 2] 경기도 시내/마을버스 전용
 # =====================================================================
 async def fetch_gyeonggi_bus(lat, lon, session, key):
     try:
         url_pos = f"http://apis.data.go.kr/6410000/busstationservice/v2/getBusStationAroundListv2?serviceKey={key}&x={lon}&y={lat}&format=json"
-        # 🌟 서버가 느리므로 4초까지 기다려줍니다.
         async with session.get(url_pos, timeout=4.0) as resp:
             text = await resp.text()
             if "SERVICE_KEY" in text or "ERROR" in text: return {}
@@ -97,7 +96,6 @@ async def fetch_gyeonggi_bus(lat, lon, session, key):
                 data = await resp.json(content_type=None)
             except Exception: return {}
 
-            # 🌟 [철벽 방어] msgBody가 텅 빈 문자열("")로 와도 죽지 않게 딕셔너리 검증
             resp_dict = data.get("response", {})
             if not isinstance(resp_dict, dict): resp_dict = {}
             body_dict = resp_dict.get("msgBody", {})
@@ -134,7 +132,7 @@ async def fetch_gyeonggi_bus(lat, lon, session, key):
                             route_ids.add(rid)
                             arrival_data.append((rid, t1, t2))
             except asyncio.TimeoutError:
-                pass # 특정 정류장이 뻗어도 다른 정류장은 계속 진행
+                pass
             except Exception:
                 pass
 
@@ -173,7 +171,6 @@ async def fetch_gyeonggi_bus(lat, lon, session, key):
                 if t2 and t2 != '0' and t2 != 'None': res[rname].append(f"{t2}분 후")
         return res
     except Exception as e:
-        # 🌟 이제 에러가 나면 텅 빈 문자가 아니라 (TimeoutError) 처럼 본명이 찍힙니다!
         print(f"⚠️ 경기 버스 예외 발생 ({type(e).__name__}): {str(e)}")
         return {}
 
@@ -397,6 +394,7 @@ async def process_optimized_route(request: RouteRequest):
             endCoordinate=Coordinate(latitude=all_points[-1].latitude, longitude=all_points[-1].longitude)
         ))
 
+    # 🌟 [수정] 첫 번째 구간뿐만 아니라 "모든" 환승 정류장/지하철역 좌표 수집
     unique_bus_coords = set()
     unique_subways = set()
     
@@ -405,10 +403,10 @@ async def process_optimized_route(request: RouteRequest):
             if seg.segmentType == "BUS":
                 if seg.pathCoordinates:
                     unique_bus_coords.add((str(seg.pathCoordinates[0].latitude), str(seg.pathCoordinates[0].longitude)))
-                break 
+                # break 삭제됨: 뒤에 이어지는 환승 버스도 계속 수집
             elif seg.segmentType in ["SUBWAY", "TRAIN"]:
                 unique_subways.add(seg.startLocationName)
-                break
+                # break 삭제됨: 뒤에 이어지는 환승 지하철도 계속 수집
 
     bus_data = {}
     subway_data = {}
@@ -420,7 +418,6 @@ async def process_optimized_route(request: RouteRequest):
         
         if tasks:
             try:
-                # 🌟 [넉넉한 8.5초] 타임아웃을 8.5초로 연장하여 Vercel 한계치까지 느린 경기도 서버를 기다려줍니다.
                 results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=8.5)
                 for res in results:
                     if not isinstance(res, Exception):
@@ -440,6 +437,7 @@ async def process_optimized_route(request: RouteRequest):
             elif t_line in api_line or api_line in t_line: return times
         return []
 
+    # 🌟 [수정] 수집된 실시간 데이터를 "모든" 환승 구간에 주입 (break 삭제)
     for r in final_routes:
         for seg in r.segments:
             if seg.segmentType == "BUS":
@@ -455,8 +453,8 @@ async def process_optimized_route(request: RouteRequest):
                             if r_clean and api_clean and (r_clean == api_clean or r_clean in api_clean or api_clean in r_clean):
                                 opt.arrivalTime1 = api_times[0] if len(api_times) > 0 else "시간표 참조"
                                 opt.arrivalTime2 = api_times[1] if len(api_times) > 1 else None
-                                break
-                break 
+                                break # (이 break는 해당 버스 찾았으니 다음 버스로 넘어가라는 뜻이므로 유지)
+                # break 삭제됨: 뒤쪽 환승 버스에도 계속 주입
                 
             elif seg.segmentType in ["SUBWAY", "TRAIN"]:
                 s_name = seg.startLocationName
@@ -466,6 +464,6 @@ async def process_optimized_route(request: RouteRequest):
                     if times:
                         opt.arrivalTime1 = times[0] if len(times) > 0 else "시간표 참조"
                         opt.arrivalTime2 = times[1] if len(times) > 1 else None
-                break
+                # break 삭제됨: 뒤쪽 환승 지하철에도 계속 주입
 
     return {"routes": final_routes}
